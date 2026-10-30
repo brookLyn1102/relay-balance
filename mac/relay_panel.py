@@ -84,7 +84,8 @@ class Panel:
         self.place_window()
         self.bind_keys()
         self.root.after(300, self.draw_bar)
-        self.refresh()
+        if not core.in_night(self.cfg):
+            self.refresh()
         self.root.after(200, self.tick)
         self.root.after(300, self.tick_usage)
         self.root.after(120, self.poll)
@@ -265,6 +266,7 @@ class Panel:
         self.lb_status.config(
             text=time.strftime("%H:%M:%S 刷新", time.localtime(data["at"])), fg=MUTED)
         self.draw_bar()
+        self.last_at = time.time()
         self.root.title(f"{core.APP_NAME} · {self.source_name()}")
 
     def short_error(self, msg):
@@ -313,6 +315,14 @@ class Panel:
             self.lb_down.config(text="↓ " + core.fmt_speed(self.net.down))
         if self.data:
             self.draw_bar()
+        # 面板自己也要按时刷新余额（原先只有启动那一次）
+        if (not core.in_night(self.cfg) and not self.busy
+                and time.time() - getattr(self, "last_at", 0) >= self.cfg["interval"]):
+            self.refresh()
+        night = core.in_night(self.cfg)
+        if night != getattr(self, "_night", None):
+            self._night = night
+            self.update_interval_label()
         self.root.after(1000, self.tick)
 
     def apply_net_row(self):
@@ -410,6 +420,11 @@ class Panel:
         self.refresh()
 
     def update_interval_label(self):
+        if core.in_night(self.cfg):
+            self.lb_interval.config(
+                text=f"夜间暂停 {core.fmt_hm(self.cfg['night_from'])}–"
+                     f"{core.fmt_hm(self.cfg['night_to'])} ▾")
+            return
         label = next((l for s, l in core.INTERVALS if s == self.cfg["interval"]), "10 分钟")
         self.lb_interval.config(text=f"每 {label}刷新 ▾")
 

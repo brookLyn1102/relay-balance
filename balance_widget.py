@@ -48,6 +48,10 @@ CCSWITCH_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
 DEFAULT_CONFIG = {
     "provider": None,        # 留空则自动取 magpie 里第一个可用供应商
     "interval": 600,
+    # 夜间暂停：这段时间不查额度（省中转调用，也让界面安静）
+    "night_pause": True,
+    "night_from": 21,        # 21:00 起
+    "night_to": 8.5,         # 次日 08:30 止（可带半小时）
     "topmost": True,
     "x": None,
     "y": None,
@@ -110,6 +114,28 @@ def load_config():
     except Exception:
         pass
     return cfg
+
+
+def fmt_hm(v):
+    """21 -> 21:00，8.5 -> 08:30。"""
+    h = int(v)
+    m = int(round((float(v) - h) * 60))
+    if m >= 60:
+        h, m = h + 1, 0
+    return f"{h:02d}:{m:02d}"
+
+
+def in_night(cfg, now=None):
+    """夜间暂停窗口，支持跨零点与半小时（默认 21:00–08:30）。"""
+    if not cfg.get("night_pause", True):
+        return False
+    a = float(cfg.get("night_from", 21))
+    b = float(cfg.get("night_to", 8.5))
+    if a == b:
+        return False
+    now = now or datetime.datetime.now()
+    t = now.hour + now.minute / 60.0
+    return (t >= a or t < b) if a > b else (a <= t < b)
 
 
 def save_config(cfg):
@@ -602,6 +628,7 @@ class Widget:
         self.strip = None
         self.settings = None
         self.week = None
+        self.night_idle = False
 
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
@@ -820,6 +847,9 @@ class Widget:
             self.bar.create_rectangle(0, 0, fill_w, 6, fill=color, outline="")
 
     def update_interval_label(self):
+        if in_night(self.cfg):
+            self.lb_interval.config(text="夜间暂停 ▾")
+            return
         label = next((l for s, l in INTERVALS if s == self.cfg["interval"]), "10 分钟")
         self.lb_interval.config(text=f"每 {label}刷新 ▾")
 
@@ -1188,7 +1218,20 @@ class Widget:
 
     def tick(self):
         delay = max(10, int(self.cfg["interval"])) * 1000
-        self.refresh()
+        if in_night(self.cfg):
+            # 夜间不查额度；每 1 分钟醒一次，到点立刻恢复
+            if not self.night_idle:
+                self.night_idle = True
+                self.lb_status.config(
+                    text=f"夜间暂停 {fmt_hm(self.cfg['night_from'])}–{fmt_hm(self.cfg['night_to'])}",
+                    fg=MUTED)
+                self.update_interval_label()
+            delay = min(delay, 60000)
+        else:
+            if self.night_idle:
+                self.night_idle = False
+                self.update_interval_label()
+            self.refresh()
         self.root.after(delay, self.tick)
 
     # ---------------- 托盘
@@ -1248,6 +1291,10 @@ class Widget:
             pystray.MenuItem("用量统计…", lambda item: self.root.after(0, self.open_usage)),
             pystray.MenuItem("设置 / 换 Key", lambda item: self.root.after(0, self.open_settings)),
             pystray.MenuItem("刷新间隔", interval_menu()),
+            pystray.MenuItem(
+                f"夜间暂停 {fmt_hm(self.cfg['night_from'])}–{fmt_hm(self.cfg['night_to'])}",
+                lambda item: self.root.after(0, self.toggle_night),
+                checked=lambda item: bool(self.cfg.get("night_pause", True))),
             pystray.MenuItem("网速条", bar_menu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("窗口置顶", toggle_top,
@@ -1260,6 +1307,17 @@ class Widget:
 
         self.icon = pystray.Icon("relay_balance", tray_image(), APP_NAME, menu)
         self.icon.run_detached()
+
+    def toggle_night(self):
+        self.cfg["night_pause"] = not self.cfg.get("night_pause", True)
+        save_config(self.cfg)
+        if not self.cfg["night_pause"]:
+            if self.night_idle:
+                self.night_idle = False
+                self.update_interval_label()
+            self.refresh()
+        elif in_night(self.cfg):
+            self.night_idle = False          # 让下一次 tick 重新写上「夜间暂停」
 
     def is_autostart(self):
         try:

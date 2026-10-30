@@ -45,6 +45,11 @@ class MenuBarApp(rumps.App):
             None,
             rumps.MenuItem("立即刷新余额", callback=self.force_refresh),
             self.interval_item,
+            rumps.MenuItem(
+                f"夜间暂停 {core.fmt_hm(self.cfg['night_from'])}–"
+                f"{core.fmt_hm(self.cfg['night_to'])}",
+                callback=self.toggle_night,
+                state=self.cfg.get("night_pause", True)),
             None,
             rumps.MenuItem("面板显示网速", callback=self.toggle_net,
                            state=self.cfg.get("net_panel", True)),
@@ -64,7 +69,8 @@ class MenuBarApp(rumps.App):
 
         self.timer_net = rumps.Timer(self.on_second, 1)
         self.timer_net.start()
-        self.refresh()
+        if not core.in_night(self.cfg):
+            self.refresh()
 
     # ------------------------------------------------------------ 菜单
 
@@ -88,6 +94,13 @@ class MenuBarApp(rumps.App):
                 item.state = (name == label)
             self.refresh()
         return handler
+
+    def toggle_night(self, sender):
+        self.cfg["night_pause"] = not self.cfg.get("night_pause", True)
+        sender.state = self.cfg["night_pause"]
+        core.save_config(self.cfg)
+        if not self.cfg["night_pause"]:
+            self.refresh()
 
     def toggle_net(self, sender):
         self.cfg["net_panel"] = not self.cfg.get("net_panel", True)
@@ -177,7 +190,8 @@ class MenuBarApp(rumps.App):
                 self.today_tok = usage.today_live()
             except Exception:
                 self.today_tok = {}
-        if not self.busy and time.time() - getattr(self, "last_at", 0) >= self.cfg["interval"]:
+        if (not core.in_night(self.cfg) and not self.busy
+                and time.time() - getattr(self, "last_at", 0) >= self.cfg["interval"]):
             self.refresh()
         self.update_title()
 

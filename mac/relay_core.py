@@ -26,6 +26,10 @@ CCSWITCH_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
 DEFAULT_CONFIG = {
     "provider": None,        # magpie 里的供应商 id；留空则自动取第一个可用供应商
     "interval": 600,         # 余额刷新间隔（秒）
+    # 夜间暂停：这段时间不查额度
+    "night_pause": True,
+    "night_from": 21,        # 21:00 起
+    "night_to": 8.5,         # 次日 08:30 止（可带半小时）
     "topmost": True,
     "panel_x": None,
     "panel_y": None,
@@ -62,6 +66,28 @@ def load_config():
     except Exception:
         pass
     return cfg
+
+
+def fmt_hm(v):
+    """21 -> 21:00，8.5 -> 08:30。"""
+    h = int(v)
+    m = int(round((float(v) - h) * 60))
+    if m >= 60:
+        h, m = h + 1, 0
+    return f"{h:02d}:{m:02d}"
+
+
+def in_night(cfg, now=None):
+    """夜间暂停窗口，支持跨零点与半小时（默认 21:00–08:30）。"""
+    if not cfg.get("night_pause", True):
+        return False
+    a = float(cfg.get("night_from", 21))
+    b = float(cfg.get("night_to", 8.5))
+    if a == b:
+        return False
+    now = now or datetime.datetime.now()
+    t = now.hour + now.minute / 60.0
+    return (t >= a or t < b) if a > b else (a <= t < b)
 
 
 def save_config(cfg):

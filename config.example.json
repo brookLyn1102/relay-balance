@@ -1,6 +1,9 @@
 {
   "provider": null,
   "interval": 600,
+  "night_pause": true,
+  "night_from": 21,
+  "night_to": 8.5,
   "topmost": true,
   "x": null,
   "y": null,
