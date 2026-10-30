@@ -256,6 +256,8 @@ class TaskbarStrip:
         self._key = None
         self._texts = []
         self._mid_w = 0
+        self._sep_w = 0
+        self._sep_gap = 0
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
         self._thread.start()
@@ -362,6 +364,7 @@ class TaskbarStrip:
             self.fg = "#1a1d23" if light else "#e8eaed"
             self.c_up = "#2563eb" if light else "#5aa9ff"
             self.c_down = "#059669" if light else "#34d399"
+            self.c_dim = "#7c8592" if light else "#8b95a3"
         else:
             dark = bool(self.cfg.get("bar_dark", True))
             if dark:
@@ -370,6 +373,7 @@ class TaskbarStrip:
             else:
                 self.bg, self.fg = "#f4f5f7", "#1a1d23"
                 self.c_up, self.c_down = "#2563eb", "#059669"
+            self.c_dim = "#8b95a3" if dark else "#7c8592"
         self._colors = True
 
     def _hdc(self):
@@ -394,7 +398,7 @@ class TaskbarStrip:
             dn_w = width("↓ 999.9 MB/s")
             bal_w = width("$9,999.99")
             tok_w = width("999.9M tok")
-            mid_w = width("100%")
+            mid_w = max(width("100%"), width("MEM"))
         finally:
             user32.ReleaseDC(self.hwnd, hdc)
 
@@ -402,10 +406,13 @@ class TaskbarStrip:
         self.pad = max(8, int(self._h * 0.22))
         self.gap = max(10, int(self._h * 0.30))
         net_w = max(up_w, dn_w) if self.stack else up_w + self.gap + dn_w
-        self._mid_w = mid_w if self.cfg.get("bar_show_mem", True) else 0
+        show_mem = bool(self.cfg.get("bar_show_mem", True))
+        self._mid_w = mid_w if show_mem else 0
+        self._sep_w = max(2, int(self._h * 0.03)) if show_mem else 0
+        self._sep_gap = max(7, int(self._h * 0.14))
         w = self.pad * 2 + net_w
-        if self._mid_w:
-            w += self.gap + self._mid_w
+        if show_mem:
+            w += self._sep_gap * 4 + self._sep_w * 2 + self._mid_w
 
         show_bal = bool(self.cfg.get("bar_show_balance", True))
         show_tok = bool(self.cfg.get("bar_show_token", True))
@@ -479,12 +486,21 @@ class TaskbarStrip:
         total = (t.get("in") or 0) + (t.get("out") or 0)
         return (_fmt_tok(total) + " tok") if total else ""
 
+    def _draw_sep(self, mem, x, h):
+        """画一条贯穿两行的竖线（比字符 | 长，视觉上才像分隔），返回下一列起点。"""
+        left = x + self._sep_gap
+        brush = gdi32.CreateSolidBrush(cref(self.c_dim))
+        rect = wintypes.RECT(left, int(h * 0.24), left + self._sep_w, int(h * 0.76))
+        user32.FillRect(mem, ctypes.byref(rect), brush)
+        gdi32.DeleteObject(brush)
+        return left + self._sep_w + self._sep_gap
+
     def _segments(self):
         up = self._fs(self.app.net.up)
         dn = self._fs(self.app.net.down)
         left = [("↑ " + up, self.c_up), ("↓ " + dn, self.c_down)]
 
-        # 中间只放一个占用百分比，省宽度
+        # 中间两行：占用百分比在上，MEM 在下
         mid = None
         if self.cfg.get("bar_show_mem", True) and self._mem is not None:
             try:
@@ -497,7 +513,7 @@ class TaskbarStrip:
                     color = "#dc2626"
                 elif pct >= 80:
                     color = "#b45309" if self._light else "#fbbf24"
-                mid = (f"{pct:.0f}%", color)
+                mid = [(f"{pct:.0f}%", color), ("MEM", self.c_dim)]
 
         right = []
         if self.cfg.get("bar_show_balance", True):
@@ -547,14 +563,17 @@ class TaskbarStrip:
                                         x + self._net_w, h // 2 - dy + i * dy * 2 + dy // 2)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
-                x += self._net_w + self.gap
+                x += self._net_w
                 if mid:
-                    text, color = mid
-                    gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x, 0, x + self._mid_w + 4, h)
-                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
-                    x += self._mid_w + self.gap
+                    x = self._draw_sep(mem, x, h)
+                    # 中列两行，行位置与左侧完全一致
+                    for i, (text, color) in enumerate(mid[:2]):
+                        gdi32.SetTextColor(mem, cref(color))
+                        box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
+                                            x + self._mid_w, h // 2 - dy + i * dy * 2 + dy // 2)
+                        user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+                    x = self._draw_sep(mem, x + self._mid_w, h)
                 if len(right) >= 2:
                     # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），右边缘对齐
                     for i, (text, color) in enumerate(right[:2]):
@@ -570,7 +589,11 @@ class TaskbarStrip:
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                     DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
             else:
-                for text, color in left + ([mid] if mid else []) + right:
+                seq = list(left)
+                if mid:
+                    seq.append((" ".join(t for t, _c in mid), mid[0][1]))
+                seq += right
+                for text, color in seq:
                     gdi32.SetTextColor(mem, cref(color))
                     box = wintypes.RECT(x, 0, w, h)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
