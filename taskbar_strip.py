@@ -10,6 +10,12 @@ import threading
 import time
 from ctypes import wintypes
 
+try:
+    from usage_stats import fmt_tokens as _fmt_tok
+except Exception:                                     # 单独跑时也不能崩
+    def _fmt_tok(n):
+        return str(int(n or 0))
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -46,6 +52,7 @@ LWA_COLORKEY = 0x1
 DT_SINGLELINE = 0x0020
 DT_VCENTER = 0x0004
 DT_LEFT = 0x0000
+DT_RIGHT = 0x0002
 DT_NOPREFIX = 0x0800
 SRCCOPY = 0x00CC0020
 TRANSPARENT = 1
@@ -384,6 +391,7 @@ class TaskbarStrip:
             up_w = width("↑ 999.9 MB/s")
             dn_w = width("↓ 999.9 MB/s")
             bal_w = width("$9,999.99")
+            tok_w = width("999.9M tok")
         finally:
             user32.ReleaseDC(self.hwnd, hdc)
 
@@ -392,8 +400,21 @@ class TaskbarStrip:
         self.gap = max(10, int(self._h * 0.30))
         net_w = max(up_w, dn_w) if self.stack else up_w + self.gap + dn_w
         w = self.pad * 2 + net_w
-        if self.cfg.get("bar_show_balance", True):
-            w += self.gap + bal_w
+
+        show_bal = bool(self.cfg.get("bar_show_balance", True))
+        show_tok = bool(self.cfg.get("bar_show_token", True))
+        right_w = 0
+        if show_bal:
+            if show_tok and self.stack:
+                right_w = max(bal_w, tok_w)          # 右侧上下两行，取宽的
+            else:
+                right_w = bal_w
+                if show_tok:
+                    right_w += self.gap + tok_w      # 单行时并排
+        elif show_tok:
+            right_w = tok_w
+        if right_w:
+            w += self.gap + right_w
         self._w = int(w)
         self._net_w = net_w
         _log("measure", "h", self._h, "w", self._w, "font", self._font_px, "stack", self.stack)
@@ -447,10 +468,17 @@ class TaskbarStrip:
 
     # ---------------- 绘制
 
+    def _tok_text(self):
+        t = getattr(self.app, "today_tok", None) or {}
+        total = (t.get("in") or 0) + (t.get("out") or 0)
+        return (_fmt_tok(total) + " tok") if total else ""
+
     def _segments(self):
         up = self._fs(self.app.net.up)
         dn = self._fs(self.app.net.down)
-        segs = [("↑ " + up, self.c_up), ("↓ " + dn, self.c_down)]
+        left = [("↑ " + up, self.c_up), ("↓ " + dn, self.c_down)]
+
+        right = []
         if self.cfg.get("bar_show_balance", True):
             w = getattr(self.app, "week", None)
             if w:
@@ -460,10 +488,14 @@ class TaskbarStrip:
                     color = "#dc2626"
                 elif pct >= 80:
                     color = "#b45309" if self._light else "#fbbf24"
-                segs.append((self._fm(w.get("left"), False), color))
+                right.append((self._fm(w.get("left"), False), color))
             else:
-                segs.append(("$—", self.fg))
-        return segs
+                right.append(("$—", self.fg))
+        if self.cfg.get("bar_show_token", True):
+            tok = self._tok_text()
+            if tok:
+                right.append((tok, self.fg))
+        return left, right
 
     def _paint(self, hwnd):
         self._theme()
@@ -484,25 +516,33 @@ class TaskbarStrip:
 
             gdi32.SetBkMode(mem, TRANSPARENT)
             gdi32.SelectObject(mem, self._font)
-            segs = self._segments()
+            left, right = self._segments()
             x = self.pad
             if self.stack:
                 dy = max(6, int(h * 0.215))
-                for i, (text, color) in enumerate(segs[:2]):
+                for i, (text, color) in enumerate(left[:2]):
                     gdi32.SetTextColor(mem, cref(color))
                     box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
                                         x + self._net_w, h // 2 - dy + i * dy * 2 + dy // 2)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
                 x += self._net_w + self.gap
-                if len(segs) > 2:
-                    text, color = segs[2]
+                if len(right) >= 2:
+                    # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），右边缘对齐
+                    for i, (text, color) in enumerate(right[:2]):
+                        cy = h // 2 - dy + i * dy * 2
+                        gdi32.SetTextColor(mem, cref(color))
+                        box = wintypes.RECT(x, cy - dy // 2, w - self.pad, cy + dy // 2)
+                        user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                        DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
+                elif right:
+                    text, color = right[0]
                     gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x, 0, w, h)
+                    box = wintypes.RECT(x, 0, w - self.pad, h)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+                                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
             else:
-                for text, color in segs:
+                for text, color in left + right:
                     gdi32.SetTextColor(mem, cref(color))
                     box = wintypes.RECT(x, 0, w, h)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
@@ -529,6 +569,9 @@ class TaskbarStrip:
                 return 1
             if msg in (WM_APP_REDRAW, WM_TIMER):
                 self._theme()
+                if getattr(self, "_need_measure", False):
+                    self._need_measure = False
+                    self._measure()              # 配置变了要按新内容重算宽度
                 self._place()
                 user32.InvalidateRect(hwnd, None, False)
                 return 0
@@ -565,6 +608,11 @@ class TaskbarStrip:
     # ---------------- 对外接口
 
     def place(self):
+        self.tick()
+
+    def refresh_layout(self):
+        """条上的内容项变了（显示余额 / token / 换行方式）：重算尺寸再摆位。"""
+        self._need_measure = True
         self.tick()
 
     def tick(self):
