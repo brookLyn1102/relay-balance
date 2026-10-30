@@ -1,6 +1,6 @@
 # 中转管家
 
-给中转站（new-api / one-api 类接口）做的一个 Windows 桌面小工具：**置顶浮窗看额度**，外加**任务栏实时网速**。
+给中转站（new-api / one-api 类接口）做的桌面小工具：**置顶浮窗看额度**，外加**实时网速**（Windows 放任务栏，macOS 放菜单栏）。
 
 - 余额、周额度一眼可见，快用完时变琥珀 / 变红
 - 任务栏条常驻，上传 / 下载实时刷新
@@ -11,6 +11,8 @@
 ![任务栏条](preview-bar.png)
 
 ![设置](preview-settings.png)
+
+> macOS 版在 [`mac/`](mac/) 目录，形态换成「菜单栏文字 + 置顶面板」，见 [mac/README.md](mac/README.md)。
 
 ## 功能
 
