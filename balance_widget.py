@@ -1,0 +1,1693 @@
+"""中转管家 —— 置顶小窗 + 托盘图标
+
+余额数据来自 new-api 系列中转的 OpenAI 兼容计费接口：
+    /v1/dashboard/billing/subscription   总额度
+    /v1/dashboard/billing/usage          累计消费（美分）
+
+密钥从 magpie 的 providers.json 读取，不保存在本文件里。
+"""
+
+import ctypes
+import datetime
+import json
+import os
+import queue
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from ctypes import wintypes
+
+import tkinter as tk
+from tkinter import font as tkfont
+
+import pystray
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+try:
+    import psutil
+except Exception:                                    # 没装 psutil 时网速功能自动隐藏
+    psutil = None
+
+APP_NAME = "中转管家"
+HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(HERE, "config.json")
+PROVIDERS_PATH = os.path.expanduser("~/.config/magpie/providers.json")
+
+DEFAULT_CONFIG = {
+    "provider": None,        # 留空则自动取 magpie 里第一个可用供应商
+    "interval": 600,
+    "topmost": True,
+    "x": None,
+    "y": None,
+    "autostart": False,
+    # 自建账号（换 key 用）；active 为 None 时回退到 magpie 里的 provider
+    "accounts": [],
+    "active": None,
+    # 周额度（公司按周发放，本周已用 = 周额度 − 总池剩余）
+    "week_quota": 100.0,
+    "week_key": None,          # 当前所属的周，如 2026-W44（仅用于显示）
+    # 网速
+    "net_panel": True,          # 主面板里显示上传/下载
+    "bar_mode": "taskbar",      # taskbar 贴任务栏 / float 悬浮条 / off 关闭
+    "bar_dx": 0,                # 任务栏条水平微调
+    "bar_dy": 0,                # 任务栏条垂直微调
+    "bar_show_balance": True,   # 条上是否显示余额
+    "bar_dark": True,           # 实底时的配色：深色 / 浅色
+    "bar_transparent": True,    # 抠掉底色，只留文字，贴合任务栏
+    "bar_stack": True,          # 上传/下载两行叠放，窄一些
+    "bar_x": None,              # 悬浮条位置
+    "bar_y": None,
+}
+
+INTERVALS = [
+    (30, "30 秒"),
+    (60, "1 分钟"),
+    (120, "2 分钟"),
+    (300, "5 分钟"),
+    (600, "10 分钟"),
+    (1800, "30 分钟"),
+]
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "中转管家"
+
+# 配色（深色卡片）
+BG = "#15171c"
+CARD = "#1b1e25"
+LINE = "#262a33"
+TEXT = "#e8eaed"
+MUTED = "#8b93a1"
+GREEN = "#34d399"
+AMBER = "#f5b544"
+RED = "#f87171"
+TRACK = "#2a2f38"
+UP = "#5aa9ff"       # 上传
+DOWN = "#34d399"     # 下载
+
+
+# ---------------------------------------------------------------- 配置
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    except Exception:
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- 数据
+
+def find_provider(node, pid):
+    if isinstance(node, dict):
+        if node.get("id") == pid:
+            return node
+        for v in node.values():
+            hit = find_provider(v, pid)
+            if hit:
+                return hit
+    elif isinstance(node, list):
+        for item in node:
+            hit = find_provider(item, pid)
+            if hit:
+                return hit
+    return None
+
+
+def iter_providers(node):
+    """遍历 magpie 配置，产出所有同时带 url 和 key 的供应商。"""
+    if isinstance(node, dict):
+        base = key = None
+        for v in node.values():
+            if isinstance(v, str) and v.startswith("http") and base is None:
+                base = v.rstrip("/")
+            elif isinstance(v, str) and v.startswith("sk-") and key is None:
+                key = v
+        if base and key:
+            yield base, key
+        for v in node.values():
+            yield from iter_providers(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from iter_providers(item)
+
+
+def read_credentials(pid):
+    with open(PROVIDERS_PATH, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not pid:                      # 没指定就挑第一个可用的
+        for base, key in iter_providers(cfg):
+            return norm_base(base), key
+        raise RuntimeError("magpie 里没有可用的供应商")
+    entry = find_provider(cfg, pid)
+    if not entry:
+        raise RuntimeError(f"magpie 里没有供应商 {pid}")
+    base = key = None
+    for v in entry.values():
+        if isinstance(v, str) and v.startswith("http") and base is None:
+            base = v.rstrip("/")
+        elif isinstance(v, str) and v.startswith("sk-") and key is None:
+            key = v
+    if not base or not key:
+        raise RuntimeError(f"{pid} 缺少 url 或 key")
+    return norm_base(base), key
+
+
+def norm_base(base):
+    base = (base or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base
+
+
+def active_account(cfg):
+    name = cfg.get("active")
+    if not name:
+        return None
+    for acc in cfg.get("accounts") or []:
+        if acc.get("name") == name and acc.get("base") and acc.get("key"):
+            return acc
+    return None
+
+
+def current_credentials(cfg):
+    """优先用设置里选中的账号，没有则回退到 magpie。返回 (base, key, 来源名)。"""
+    acc = active_account(cfg)
+    if acc:
+        return norm_base(acc["base"]), acc["key"], acc["name"]
+    base, key = read_credentials(cfg.get("provider"))
+    return base, key, f"magpie · {cfg.get('provider')}"
+
+
+def mask_key(key):
+    if not key:
+        return "（空）"
+    if len(key) <= 10:
+        return key[:2] + "••••"
+    return key[:5] + "••••••" + key[-4:]
+
+
+def fmt_money(v, sign=True):
+    """负数写成 -$1.23，而不是 $-1.23。"""
+    v = float(v)
+    body = f"${abs(v):,.2f}"
+    return ("-" + body) if (sign and v < 0) else body
+
+
+def api_get(base, key, path):
+    req = urllib.request.Request(base + path, headers={"Authorization": "Bearer " + key})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def week_key(ts=None):
+    """ISO 周标识（周一为一周起点），如 2026-W44。"""
+    t = time.localtime(ts) if ts else time.localtime()
+    y, w, _ = datetime.date(t.tm_year, t.tm_mon, t.tm_mday).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def query_balance(base, key):
+    sub = api_get(base, key, "/v1/dashboard/billing/subscription")
+    use = api_get(base, key, "/v1/dashboard/billing/usage")
+    total = float(sub.get("hard_limit_usd") or 0)
+    used = float(use.get("total_usage") or 0) / 100.0
+    return {
+        "total": total,
+        "used": used,
+        "left": total - used,
+        "pct": used / total * 100 if total else 0.0,
+        "at": time.time(),
+    }
+
+
+def fetch_balance(cfg):
+    base, key, src = current_credentials(cfg)
+    data = query_balance(base, key)
+    data["source"] = src
+    return data
+
+
+# ---------------------------------------------------------------- 网速
+
+class NetMeter:
+    """系统整体上传 / 下载速率（字节每秒），排除回环接口。
+
+    magpie 这类本地代理走 127.0.0.1，若不排除会把同一份流量算两遍。
+    """
+
+    def __init__(self):
+        self.last = None
+        self.up = 0.0
+        self.down = 0.0
+
+    @staticmethod
+    def _counters():
+        if psutil is None:
+            return 0, 0
+        try:
+            per = psutil.net_io_counters(pernic=True)
+        except Exception:
+            return 0, 0
+        sent = recv = 0
+        for name, c in per.items():
+            low = name.lower()
+            if "loopback" in low or "teredo" in low or "isatap" in low:
+                continue
+            sent += c.bytes_sent
+            recv += c.bytes_recv
+        return sent, recv
+
+    def sample(self):
+        sent, recv = self._counters()
+        now = time.monotonic()
+        if self.last is None:
+            self.last = (sent, recv, now)
+            return self.up, self.down
+        s0, r0, t0 = self.last
+        dt = max(0.2, now - t0)
+        self.last = (sent, recv, now)
+        self.up = max(0.0, (sent - s0) / dt)
+        self.down = max(0.0, (recv - r0) / dt)
+        return self.up, self.down
+
+
+def fmt_speed(v):
+    if v < 1024:
+        return f"{v:.0f} B/s"
+    if v < 1024 ** 2:
+        return f"{v / 1024:.1f} KB/s"
+    return f"{v / 1024 ** 2:.2f} MB/s"
+
+
+# ---------------------------------------------------------------- 窗口工具
+
+def round_window(win):
+    """Win11 圆角：无边框窗口默认是直角。"""
+    try:
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        pref = ctypes.c_int(2)  # DWMWCP_ROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass
+
+
+def taskbar_metrics():
+    """返回 (任务栏顶边 y, 托盘区左边 x, 任务栏高度)，单位物理像素。"""
+    u = ctypes.windll.user32
+    tb = u.FindWindowW("Shell_TrayWnd", None)
+    if not tb:
+        return None
+    tr = wintypes.RECT()
+    u.GetWindowRect(tb, ctypes.byref(tr))
+    tray = u.FindWindowExW(tb, None, "TrayNotifyWnd", None)
+    right = tr.right
+    if tray:
+        nr = wintypes.RECT()
+        u.GetWindowRect(tray, ctypes.byref(nr))
+        if nr.right - nr.left > 0:
+            right = nr.left
+    return tr.top, right, tr.bottom - tr.top
+
+
+def taskbar_is_light():
+    """任务栏是否为浅色（系统强调色/明暗主题）。浅色时文字要用深色。"""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        val, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+        return bool(val)
+    except Exception:
+        return False
+
+
+def as_tool_window(win, no_activate=True):
+    """任务栏条：不出现在 Alt+Tab，点击不抢焦点。"""
+    try:
+        win.update_idletasks()
+        hwnd = int(win.frame(), 16)
+        u = ctypes.windll.user32
+        u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.GetWindowLongW.restype = ctypes.c_long
+        u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+        u.SetWindowLongW.restype = ctypes.c_long
+        ex = u.GetWindowLongW(hwnd, -20)
+        add = 0x80                      # WS_EX_TOOLWINDOW
+        if no_activate:
+            add |= 0x08000000           # WS_EX_NOACTIVATE
+        u.SetWindowLongW(hwnd, -20, ctypes.c_long(ex | add))
+        # 改扩展样式后必须 frame changed 重画，否则分层窗口会整块残影/不显示
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 0x1, 0x2, 0x4
+        SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x10, 0x20, 0x40
+        u.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                       SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER |
+                       SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW)
+        return hwnd
+    except Exception:
+        return None
+
+
+def raise_over_taskbar(hwnd, force_top=False):
+    """任务栏是 XAML 合成层，普通 topmost 会被它盖住；用 SetWindowBand 提到更高 band。
+
+    force_top=True 时先按 HWND_TOP 重排一次 Z 序——截图工具、任务栏重排之后
+    任务栏会把自己提到最上面，只调 TOPMOST 抢不回来，必须先插到 Z 序顶部。
+    """
+    if not hwnd:
+        return
+    u = ctypes.windll.user32
+    try:
+        fn = u.SetWindowBand
+        fn.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_uint]
+        fn.restype = wintypes.BOOL
+        fn(hwnd, None, 16)              # ZBID_SYSTEM_TOOLS
+    except Exception:
+        pass
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x1, 0x2, 0x10, 0x40
+    flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+    if force_top:
+        u.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)      # HWND_TOP
+    u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, flags)         # HWND_TOPMOST
+
+
+def is_cloaked(hwnd):
+    """虚拟桌面/挂起的 UWP 窗口仍"可见"但不显示，遍历 Z 序时要跳过。"""
+    try:
+        v = wintypes.DWORD(0)
+        hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(hwnd), 14, ctypes.byref(v), ctypes.sizeof(v))  # DWMWA_CLOAKED
+        return hr == 0 and bool(v.value)
+    except Exception:
+        return False
+
+
+def window_covered(hwnd):
+    """条是否被外部窗口（截图遮罩、任务栏重排后的层级）盖住了。
+
+    走 Z 序比对而不是 WindowFromPoint：透明底的条在空白处点击会穿透，
+    按点命中判断会误报成「被任务栏盖住」。自家的面板 / 菜单不算。
+    """
+    if not hwnd:
+        return False
+    u = ctypes.windll.user32
+    try:
+        r = wintypes.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        w = u.GetTopWindow(None)
+        while w and w != hwnd:
+            if u.IsWindowVisible(w) and not u.IsIconic(w) and not is_cloaked(w):
+                wr = wintypes.RECT()
+                u.GetWindowRect(w, ctypes.byref(wr))
+                if (wr.left < r.right and wr.right > r.left and
+                        wr.top < r.bottom and wr.bottom > r.top):
+                    pid = wintypes.DWORD(0)
+                    u.GetWindowThreadProcessId(w, ctypes.byref(pid))
+                    if pid.value != os.getpid():
+                        return True
+            w = u.GetWindow(w, 2)           # GW_HWNDNEXT：往 Z 序下方走
+        return False
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- 图标
+
+def tray_image():
+    ico = os.path.join(HERE, "app.ico")
+    if os.path.exists(ico):
+        try:
+            return Image.open(ico).convert("RGBA").resize((64, 64), Image.LANCZOS)
+        except Exception:
+            pass
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, 62, 62], radius=15, fill=(52, 211, 153, 255))
+    font = None
+    for path in (r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\seguisb.ttf"):
+        try:
+            font = ImageFont.truetype(path, 44)
+            break
+        except Exception:
+            continue
+    if font:
+        d.text((32, 31), "¥", font=font, fill=(18, 21, 26, 255), anchor="mm")
+    return img
+
+
+# ---------------------------------------------------------------- 主界面
+
+class Widget:
+    def __init__(self):
+        self.cfg = load_config()
+        self.data = None
+        self.status = "正在读取…"
+        self.ok = True
+        self.visible = True
+        self.busy = False
+        self.busy_since = 0.0
+        self.results = queue.Queue()
+        self.icon = None
+        self.net = NetMeter()
+        self.strip = None
+        self.settings = None
+        self.week = None
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+
+        self.root = tk.Tk()
+        self.root.title(APP_NAME)
+        self.root.overrideredirect(True)
+        self.root.configure(bg=BG)
+        self.root.attributes("-topmost", bool(self.cfg["topmost"]))
+        try:
+            self.root.iconbitmap(os.path.join(HERE, "app.ico"))
+        except Exception:
+            pass
+
+        self.w = 332
+        self.root.geometry(f"{self.w}x400")
+        self.f_zh = "Microsoft YaHei UI"
+        self.build_ui()
+        self.update_title()
+
+        # 高度按内容实测，避免换字体 / 换 DPI 时底部被切
+        self.root.update_idletasks()
+        self.h = max(200, self.root.winfo_reqheight())
+
+        x, y = self.cfg.get("x"), self.cfg.get("y")
+        if x is None or y is None:
+            sw = self.root.winfo_screenwidth()
+            self.root.geometry(f"{self.w}x{self.h}+{sw - self.w - 48}+64")
+        else:
+            self.root.geometry(f"{self.w}x{self.h}+{int(x)}+{int(y)}")
+        self.root.update_idletasks()
+
+        self.bind_drag()
+        self.round_corners()
+        self.start_tray()
+        self.apply_bar_mode(self.cfg.get("bar_mode", "taskbar"))
+        self.refresh()
+        self.root.after(200, self.tick)
+        self.root.after(900, self.tick_net)
+
+    def round_corners(self):
+        round_window(self.root)
+
+    # ---------------- UI
+
+    def build_ui(self):
+        outer = tk.Frame(self.root, bg=BG, highlightbackground=LINE, highlightthickness=1)
+        outer.pack(fill="both", expand=True)
+
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x", padx=14, pady=(12, 0))
+
+        self.dot = tk.Canvas(head, width=8, height=8, bg=BG, highlightthickness=0)
+        self.dot.create_oval(0, 0, 8, 8, fill=MUTED, outline="")
+        self.dot.pack(side="left", pady=(6, 0))
+
+        self.lb_title = tk.Label(head, text=APP_NAME, bg=BG, fg=MUTED, font=(self.f_zh, 9))
+        self.lb_title.pack(side="left", padx=(7, 0), pady=(3, 0))
+
+        self.btn_close = tk.Label(head, text="✕", bg=BG, fg=MUTED, font=(self.f_zh, 10), cursor="hand2")
+        self.btn_close.pack(side="right", pady=(2, 0))
+        self.btn_close.bind("<Button-1>", lambda e: self.hide())
+
+        self.btn_pin = tk.Label(
+            head, text="置顶", bg=BG, fg=GREEN if self.cfg["topmost"] else MUTED,
+            font=(self.f_zh, 9), cursor="hand2")
+        self.btn_pin.pack(side="right", padx=(0, 12), pady=(4, 0))
+        self.btn_pin.bind("<Button-1>", lambda e: self.toggle_topmost())
+
+        self.btn_gear = tk.Label(head, text="⚙", bg=BG, fg=MUTED,
+                                 font=(self.f_zh, 10), cursor="hand2")
+        self.btn_gear.pack(side="right", padx=(0, 10), pady=(1, 0))
+        self.btn_gear.bind("<Button-1>", lambda e: self.open_settings())
+        self.btn_gear.bind("<Enter>", lambda e: self.btn_gear.config(fg=TEXT))
+        self.btn_gear.bind("<Leave>", lambda e: self.btn_gear.config(fg=MUTED))
+
+        self.btn_refresh = tk.Label(head, text="↻", bg=BG, fg=MUTED,
+                                    font=(self.f_zh, 11), cursor="hand2")
+        self.btn_refresh.pack(side="right", padx=(0, 10), pady=(0, 0))
+        self.btn_refresh.bind("<Button-1>", lambda e: self.refresh())
+
+        body = tk.Frame(outer, bg=BG)
+        body.pack(fill="x", padx=16, pady=(8, 0))
+
+        self.lb_left = tk.Label(body, text="—", bg=BG, fg=TEXT,
+                                font=("Segoe UI Semibold", 26), anchor="w")
+        self.lb_left.pack(side="left")
+
+        self.lb_pct = tk.Label(body, text="", bg=BG, fg=MUTED,
+                               font=(self.f_zh, 9), anchor="se")
+        self.lb_pct.pack(side="right", pady=(0, 6))
+
+        self.bar = tk.Canvas(outer, height=6, bg=BG, highlightthickness=0)
+        self.bar.pack(fill="x", padx=16, pady=(6, 0))
+        self.bar.bind("<Configure>", lambda e: self.draw_bar())
+
+        self.lb_detail = tk.Label(outer, text="", bg=BG, fg=MUTED,
+                                  font=(self.f_zh, 8), anchor="w")
+        self.lb_detail.pack(fill="x", padx=16, pady=(8, 0))
+
+        # 总额度（中转侧总额 / 已用 / 剩余）
+        self.lb_pool = tk.Label(outer, text="", bg=BG, fg=MUTED,
+                                font=(self.f_zh, 8), anchor="w")
+        self.lb_pool.pack(fill="x", padx=16, pady=(3, 0))
+
+        # 实时网速：上传 / 下载
+        self.net_row = tk.Frame(outer, bg=BG)
+        self.lb_up = tk.Label(self.net_row, text="↑ —", bg=BG, fg=UP,
+                              font=("Consolas", 9), anchor="w")
+        self.lb_up.pack(side="left")
+        self.lb_down = tk.Label(self.net_row, text="↓ —", bg=BG, fg=DOWN,
+                                font=("Consolas", 9), anchor="e")
+        self.lb_down.pack(side="right")
+
+        foot = self.foot = tk.Frame(outer, bg=BG)
+        foot.pack(fill="x", padx=16, pady=(7, 12))
+
+        self.lb_status = tk.Label(foot, text="", bg=BG, fg=MUTED,
+                                  font=(self.f_zh, 8), anchor="w")
+        self.lb_status.pack(side="left")
+
+        self.lb_interval = tk.Label(foot, text="", bg=BG, fg=MUTED,
+                                    font=(self.f_zh, 8), anchor="e", cursor="hand2")
+        self.lb_interval.pack(side="right")
+        self.lb_interval.bind("<Button-1>", lambda e: self.popup_interval(e))
+
+        self.build_menu()
+
+        for w in (outer, body, head, foot, self.lb_left, self.net_row,
+                  self.lb_detail, self.lb_pool, self.lb_pct, self.lb_status):
+            w.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+
+        self.update_interval_label()
+        self.apply_net_panel()
+
+    def build_menu(self):
+        self.menu = tk.Menu(self.root, tearoff=0, bg=CARD, fg=TEXT,
+                            activebackground="#2b303a", activeforeground=TEXT,
+                            bd=0, font=(self.f_zh, 9))
+        self.menu.add_command(label="立即刷新", command=self.refresh)
+        for sec, label in INTERVALS:
+            self.menu.add_command(label=f"每 {label}", command=lambda s=sec: self.set_interval(s))
+        self.menu.add_separator()
+        self.menu.add_cascade(label="网速条", menu=self.build_bar_menu(self.menu))
+        self.menu.add_separator()
+        self.menu.add_command(label="设置 / 换 Key", command=self.open_settings)
+        self.menu.add_command(label="隐藏到托盘", command=self.hide)
+        self.menu.add_command(label="退出", command=self.quit)
+
+    def build_bar_menu(self, parent):
+        m = tk.Menu(parent, tearoff=0, bg=CARD, fg=TEXT,
+                    activebackground="#2b303a", activeforeground=TEXT,
+                    bd=0, font=(self.f_zh, 9))
+        mode = self.cfg.get("bar_mode", "taskbar")
+        m.add_command(label=("● " if mode == "taskbar" else "○ ") + "贴任务栏显示",
+                      command=lambda: self.apply_bar_mode("taskbar"))
+        m.add_command(label=("● " if mode == "float" else "○ ") + "悬浮小条",
+                      command=lambda: self.apply_bar_mode("float"))
+        m.add_command(label=("● " if mode == "off" else "○ ") + "关闭网速条",
+                      command=lambda: self.apply_bar_mode("off"))
+        m.add_separator()
+        m.add_command(label="左移", command=lambda: self.nudge_bar(-24, 0))
+        m.add_command(label="右移", command=lambda: self.nudge_bar(24, 0))
+        m.add_command(label="上移", command=lambda: self.nudge_bar(0, -6))
+        m.add_command(label="下移", command=lambda: self.nudge_bar(0, 6))
+        m.add_command(label="复位位置", command=self.reset_bar_pos)
+        m.add_separator()
+        m.add_command(label=("✓ " if self.cfg.get("bar_show_balance", True) else "　") + "条上显示余额",
+                      command=lambda: self.set_cfg_bool("bar_show_balance"))
+        m.add_command(label=("✓ " if self.cfg.get("bar_transparent", True) else "　") + "透明底",
+                      command=lambda: self.set_cfg_bool("bar_transparent"))
+        m.add_command(label=("✓ " if self.cfg.get("bar_stack", True) else "　") + "两行叠放",
+                      command=lambda: self.set_cfg_bool("bar_stack"))
+        m.add_command(label=("✓ " if self.cfg.get("bar_dark", True) else "　") + "实底深色",
+                      command=lambda: self.set_cfg_bool("bar_dark"))
+        m.add_command(label=("✓ " if self.cfg.get("net_panel", True) else "　") + "面板显示网速",
+                      command=lambda: self.set_cfg_bool("net_panel"))
+        return m
+
+    def draw_bar(self):
+        self.bar.delete("all")
+        width = self.bar.winfo_width()
+        if width <= 1:
+            return
+        pct = (self.week["pct"] if self.week else 0)
+        pct = max(0.0, min(100.0, pct))
+        self.bar.create_rectangle(0, 0, width, 6, fill=TRACK, outline="")
+        fill_w = int(width * pct / 100.0)
+        if fill_w > 0:
+            color = GREEN if pct < 80 else (AMBER if pct < 95 else RED)
+            self.bar.create_rectangle(0, 0, fill_w, 6, fill=color, outline="")
+
+    def update_interval_label(self):
+        label = next((l for s, l in INTERVALS if s == self.cfg["interval"]), "10 分钟")
+        self.lb_interval.config(text=f"每 {label}刷新 ▾")
+
+    # ---------------- 网速
+
+    def apply_net_panel(self):
+        on = bool(self.cfg.get("net_panel", True)) and psutil is not None
+        mapped = bool(self.net_row.winfo_ismapped())
+        if on and not mapped:
+            self.net_row.pack(fill="x", padx=16, pady=(6, 0), before=self.foot)
+        elif not on and mapped:
+            self.net_row.pack_forget()
+        self.resize_height()
+
+    def resize_height(self):
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            return
+        h = max(180, self.root.winfo_reqheight())
+        if h != getattr(self, "h", None):
+            self.h = h
+            self.root.geometry(f"{self.w}x{self.h}")
+
+    def render_net_panel(self):
+        if not self.net_row.winfo_ismapped():
+            return
+        self.lb_up.config(text="↑ " + fmt_speed(self.net.up))
+        self.lb_down.config(text="↓ " + fmt_speed(self.net.down))
+
+    def tick_net(self):
+        try:
+            self.drain()
+        except Exception:
+            pass
+        if self.net_row.winfo_ismapped() or self.strip is not None:
+            self.net.sample()
+            self.render_net_panel()
+            if self.strip is not None:
+                try:
+                    self.strip.tick()
+                except Exception:
+                    pass
+        self.root.after(1000, self.tick_net)
+
+    # ---------------- 网速条
+
+    def apply_bar_mode(self, mode):
+        self.cfg["bar_mode"] = mode
+        save_config(self.cfg)
+        self.destroy_strip()
+        if mode != "off" and psutil is not None:
+            try:
+                self.strip = TrafficStrip(self, mode)
+            except Exception:
+                self.strip = None
+        self.build_menu()
+        self.refresh_tray_menu()
+
+    def destroy_strip(self):
+        if self.strip is not None:
+            try:
+                self.strip.destroy()
+            except Exception:
+                pass
+            self.strip = None
+
+    def nudge_bar(self, dx, dy):
+        if self.cfg.get("bar_mode") == "float":
+            if self.strip is not None:
+                x = self.strip.winfo_x() + dx
+                y = self.strip.winfo_y() + dy
+                self.cfg["bar_x"], self.cfg["bar_y"] = x, y
+                self.strip.place()
+        else:
+            self.cfg["bar_dx"] = int(self.cfg.get("bar_dx") or 0) + dx
+            self.cfg["bar_dy"] = int(self.cfg.get("bar_dy") or 0) + dy
+            if self.strip is not None:
+                self.strip.place()
+        save_config(self.cfg)
+
+    def reset_bar_pos(self):
+        self.cfg["bar_dx"] = 0
+        self.cfg["bar_dy"] = 0
+        self.cfg["bar_x"] = None
+        self.cfg["bar_y"] = None
+        save_config(self.cfg)
+        if self.strip is not None:
+            self.strip.place()
+
+    def set_week_quota(self, quota):
+        self.cfg["week_quota"] = float(quota)
+        save_config(self.cfg)
+        self.repaint()
+
+    def repaint(self):
+        """用已有数据立刻重算面板，不等下一次联网。"""
+        if self.data:
+            self.apply(self.data, None)
+
+    def set_cfg_bool(self, key):
+        self.cfg[key] = not bool(self.cfg.get(key, True))
+        save_config(self.cfg)
+        if key == "net_panel":
+            self.apply_net_panel()
+        if key in ("bar_dark", "bar_transparent", "bar_stack") and self.strip is not None:
+            self.strip._pos = None
+            self.strip.apply_theme()
+            self.strip.render()
+            self.strip.place()
+        self.build_menu()
+        self.refresh_tray_menu()
+
+    def update_title(self):
+        acc = active_account(self.cfg)
+        if not acc:
+            self.lb_title.config(text=APP_NAME)
+            return
+        name = acc["name"]
+        if len(name) > 9:
+            name = name[:8] + "…"
+        self.lb_title.config(text=f"{APP_NAME} · {name}")
+
+    def open_settings(self):
+        win = getattr(self, "settings", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+        self.settings = SettingsWindow(self)
+
+    # ---------------- 拖拽
+
+    def bind_drag(self):
+        targets = [self.root]
+        for w in self.root.winfo_children():
+            targets.append(w)
+            for c in w.winfo_children():
+                targets.append(c)
+        for w in targets:
+            w.bind("<Button-1>", self.drag_start, add="+")
+            w.bind("<B1-Motion>", self.drag_move, add="+")
+
+    def drag_start(self, event):
+        self._dx = event.x_root - self.root.winfo_x()
+        self._dy = event.y_root - self.root.winfo_y()
+
+    def drag_move(self, event):
+        self.root.geometry(f"+{event.x_root - self._dx}+{event.y_root - self._dy}")
+
+    # ---------------- 状态
+
+    def set_topmost(self, on):
+        self.cfg["topmost"] = bool(on)
+        self.root.attributes("-topmost", bool(on))
+        self.btn_pin.config(fg=GREEN if on else MUTED)
+        save_config(self.cfg)
+        self.refresh_tray_menu()
+
+    def toggle_topmost(self):
+        self.set_topmost(not self.cfg["topmost"])
+
+    def set_interval(self, seconds):
+        self.cfg["interval"] = int(seconds)
+        save_config(self.cfg)
+        self.update_interval_label()
+        self.refresh_tray_menu()
+
+    def refresh_tray_menu(self):
+        try:
+            self.icon.update_menu()
+        except Exception:
+            pass
+
+    def popup_interval(self, event):
+        self.menu.tk_popup(event.x_root, event.y_root)
+
+    def hide(self):
+        self.save_pos()
+        win = getattr(self, "settings", None)
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        self.root.withdraw()
+        self.visible = False
+
+    def show(self):
+        self.root.deiconify()
+        self.root.attributes("-topmost", bool(self.cfg["topmost"]))
+        self.visible = True
+
+    def toggle_visible(self):
+        if self.visible:
+            self.hide()
+        else:
+            self.show()
+
+    def save_pos(self):
+        self.cfg["x"] = self.root.winfo_x()
+        self.cfg["y"] = self.root.winfo_y()
+        save_config(self.cfg)
+
+    def quit(self):
+        self.save_pos()
+        self.destroy_strip()
+        try:
+            self.icon.stop()
+        except Exception:
+            pass
+        self.root.destroy()
+
+    # ---------------- 刷新
+
+    def refresh(self):
+        if self.busy:
+            return
+        self.busy = True
+        self.busy_since = time.time()
+        self.lb_status.config(text="刷新中…", fg=MUTED)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        """子线程只往队列里丢结果，绝不碰 Tk 组件。"""
+        try:
+            self.results.put((fetch_balance(self.cfg), None))
+        except Exception as exc:
+            self.results.put((None, str(exc)))
+
+    def drain(self):
+        """主线程每秒取一次结果；顺带做超时兜底，避免卡在「刷新中」。"""
+        while True:
+            try:
+                data, err = self.results.get_nowait()
+            except queue.Empty:
+                break
+            self.apply(data, err)
+        if self.busy and time.time() - self.busy_since > 25:
+            self.busy = False
+            self.lb_status.config(text="查询超时，稍后重试", fg=AMBER)
+
+
+    def apply(self, data, error):
+        self.busy = False
+        if error:
+            self.ok = False
+            self.dot.itemconfig(1, fill=RED)
+            self.lb_status.config(text=self.short_error(error), fg=RED)
+            if self.data is None:
+                self.lb_left.config(text="—")
+                self.lb_pct.config(text="")
+                self.lb_detail.config(text="查不到数据")
+                self.lb_pool.config(text="")
+            return
+
+        self.ok = True
+        self.data = data
+        quota = float(self.cfg.get("week_quota") or 100.0)
+        pool = data["left"]                       # 总池剩余＝本周还能花的钱
+        spent = max(0.0, quota - pool)            # 本周已用＝周额度 − 总池剩余
+        pct = (spent / quota * 100) if quota else 0.0
+        self.cfg["week_key"] = week_key()         # 只是让跨周检查不误触发
+        week_left = quota - spent
+        self.week = {"spent": spent, "quota": quota, "pct": pct,
+                     "left": pool, "week_left": week_left}
+        self.update_title()
+        color = GREEN if pct < 80 else (AMBER if pct < 95 else RED)
+        self.dot.itemconfig(1, fill=color)
+        self.lb_left.config(text=fmt_money(pool), fg=RED if pool < 0 else TEXT)
+        self.lb_pct.config(
+            text=(f"本周 {pct:.0f}%" if pct < 1000 else "本周 >999%"), fg=color)
+        detail_txt = f"本周 ${spent:,.2f} / ${quota:,.0f}"
+        self.lb_detail.config(text=detail_txt)
+        self.lb_pool.config(
+            text=f"总额度 ${data['total']:,.2f}   ·   已用 ${data['used']:,.2f}")
+        self.lb_status.config(text=time.strftime("%H:%M:%S 刷新", time.localtime(data["at"])), fg=MUTED)
+        self.draw_bar()
+        if self.icon:
+            try:
+                self.icon.title = (f"{APP_NAME} · 余额 {fmt_money(pool)}"
+                                   f"（本周 {pct:.0f}%）")
+            except Exception:
+                pass
+
+    @staticmethod
+    def short_error(msg):
+        low = msg.lower()
+        if "timed out" in low or "timeout" in low:
+            return "超时，稍后再试"
+        if "401" in low or "unauthorized" in low:
+            return "密钥无效"
+        if "http 404" in low:
+            return "中转没有计费接口"
+        if "no such file" in low or "找不到" in low or "没有供应商" in msg:
+            return "读不到 magpie 配置"
+        return msg[:42]
+
+    def tick(self):
+        delay = max(10, int(self.cfg["interval"])) * 1000
+        self.refresh()
+        self.root.after(delay, self.tick)
+
+    # ---------------- 托盘
+
+    def start_tray(self):
+        def set_interval(sec):
+            self.root.after(0, lambda: self.set_interval(sec))
+
+        def toggle_top(item):
+            self.root.after(0, self.toggle_topmost)
+
+        def toggle_show(item):
+            self.root.after(0, self.toggle_visible)
+
+        def autostart(item):
+            self.root.after(0, self.toggle_autostart)
+
+        def quit_app(item):
+            self.root.after(0, self.quit)
+
+        def bar_mode(mode):
+            self.root.after(0, lambda: self.apply_bar_mode(mode))
+
+        def bar_menu():
+            return pystray.Menu(
+                pystray.MenuItem("贴任务栏", lambda i: bar_mode("taskbar"),
+                                 checked=lambda i: self.cfg.get("bar_mode") == "taskbar",
+                                 radio=True),
+                pystray.MenuItem("悬浮条", lambda i: bar_mode("float"),
+                                 checked=lambda i: self.cfg.get("bar_mode") == "float",
+                                 radio=True),
+                pystray.MenuItem("关闭", lambda i: bar_mode("off"),
+                                 checked=lambda i: self.cfg.get("bar_mode") == "off",
+                                 radio=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("左移", lambda i: self.root.after(0, lambda: self.nudge_bar(-24, 0))),
+                pystray.MenuItem("右移", lambda i: self.root.after(0, lambda: self.nudge_bar(24, 0))),
+                pystray.MenuItem("上移", lambda i: self.root.after(0, lambda: self.nudge_bar(0, -6))),
+                pystray.MenuItem("下移", lambda i: self.root.after(0, lambda: self.nudge_bar(0, 6))),
+            )
+
+        def interval_menu():
+            return pystray.Menu(*[
+                pystray.MenuItem(
+                    label,
+                    (lambda s: (lambda item: set_interval(s)))(sec),
+                    checked=(lambda s: (lambda item: self.cfg["interval"] == s))(sec),
+                    radio=True,
+                )
+                for sec, label in INTERVALS
+            ])
+
+        menu = pystray.Menu(
+            pystray.MenuItem(lambda item: "隐藏面板" if self.visible else "显示面板",
+                             toggle_show, default=True),
+            pystray.MenuItem("立即刷新", lambda item: self.root.after(0, self.refresh)),
+            pystray.MenuItem("设置 / 换 Key", lambda item: self.root.after(0, self.open_settings)),
+            pystray.MenuItem("刷新间隔", interval_menu()),
+            pystray.MenuItem("网速条", bar_menu()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("窗口置顶", toggle_top,
+                             checked=lambda item: self.cfg["topmost"]),
+            pystray.MenuItem("开机自启", autostart,
+                             checked=lambda item: self.is_autostart()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", quit_app),
+        )
+
+        self.icon = pystray.Icon("relay_balance", tray_image(), APP_NAME, menu)
+        self.icon.run_detached()
+
+    def is_autostart(self):
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+                winreg.QueryValueEx(k, RUN_NAME)
+            return True
+        except Exception:
+            return False
+
+    def toggle_autostart(self):
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                if self.is_autostart():
+                    winreg.DeleteValue(k, RUN_NAME)
+                else:
+                    pyw = sys.executable.replace("python.exe", "pythonw.exe")
+                    winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ,
+                                      f'"{pyw}" "{os.path.abspath(__file__)}"')
+        except Exception:
+            pass
+        try:
+            self.icon.update_menu()
+        except Exception:
+            pass
+
+    def run(self):
+        self.root.mainloop()
+
+
+# ---------------------------------------------------------------- 网速条
+
+FONT_MONO = r"C:\Windows\Fonts\consola.ttf"
+FONT_MONO_BOLD = r"C:\Windows\Fonts\consolab.ttf"
+FONT_UI = r"C:\Windows\Fonts\msyh.ttc"
+KEY_COLOR = "#ff00fe"          # 透明色key（几乎不会用到）
+
+
+def load_font(size):
+    """等宽加粗字体，取不到就退回普通体。"""
+    for path in (FONT_MONO_BOLD, FONT_MONO):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+class TrafficStrip(tk.Toplevel):
+    """贴在任务栏上的实时网速条。
+
+    Win11 任务栏是 XAML 合成层，SetParent 进去会被盖住，所以这里做成
+    无边框、不抢焦点、始终置顶的独立小窗，直接压在任务栏对应位置。
+    """
+
+    def __init__(self, app, mode="taskbar"):
+        super().__init__(app.root)
+        self.app = app
+        self.cfg = app.cfg
+        self.mode = mode
+        self.hwnd = None
+        self._img = None
+        self._pos = None
+        self._transparent = False
+
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        try:
+            self.attributes("-transparentcolor", KEY_COLOR)
+            self._transparent = True
+        except Exception:
+            pass
+
+        self.apply_theme()
+        self.render()
+        self.place()
+        self.hwnd = as_tool_window(self)
+        if self.mode == "taskbar":
+            raise_over_taskbar(self.hwnd)
+
+    # ---------------- 外观
+
+    def apply_theme(self):
+        self.transparent = bool(self.cfg.get("bar_transparent", True)) and self._transparent
+        self.light = taskbar_is_light()
+        if self.transparent:
+            # 抠掉底色，只留文字；key 色取接近任务栏的颜色，抗锯齿边缘不突兀
+            self.key_color = "#f3f4f6" if self.light else "#1f2229"
+            self.bg = self.key_color
+            if self.light:
+                self.fg, self.c_up, self.c_down = "#1a1d23", "#2563eb", "#059669"
+            else:
+                self.fg, self.c_up, self.c_down = "#e8eaed", "#5aa9ff", "#34d399"
+            self.c_bal = self.fg
+            try:
+                self.attributes("-transparentcolor", self.key_color)
+            except Exception:
+                self.transparent = False
+        if not self.transparent:
+            self.key_color = KEY_COLOR
+            dark = bool(self.cfg.get("bar_dark", True))
+            if dark:
+                self.bg, self.fg = BG, "#e8eaed"      # 跟右键菜单同一底色
+                self.c_up, self.c_down, self.c_bal = "#5aa9ff", "#34d399", "#e8eaed"
+            else:
+                self.bg, self.fg = "#f4f5f7", "#1a1d23"
+                self.c_up, self.c_down, self.c_bal = "#2563eb", "#059669", "#111827"
+        try:
+            self.configure(bg=self.bg)      # 窗口自身底色也跟上，resize 瞬间不露馅
+        except Exception:
+            pass
+
+        if self.mode == "taskbar":
+            m = taskbar_metrics()
+            self.h = m[2] if m else 40
+        else:
+            self.h = 34
+        self.stack = bool(self.cfg.get("bar_stack", True))
+        size = max(12, int(self.h * (0.30 if self.stack else 0.34)))
+        self.f = load_font(size)
+
+        self.pad = max(8, int(self.h * (0.22 if self.stack else 0.26)))
+        self.gap = max(8, int(self.h * 0.28))
+        # 用最宽的可能值定宽度，数字变化时不会抖动
+        up_w = self.f.getlength("↑ 999.9 MB/s")
+        dn_w = self.f.getlength("↓ 999.9 MB/s")
+        if self.stack:
+            net_w = max(up_w, dn_w)
+        else:
+            net_w = up_w + self.gap + dn_w
+        w = self.pad * 2 + net_w
+        if self.cfg.get("bar_show_balance", True):
+            w += self.gap + self.f.getlength("$9,999.99")
+        self.w = int(w) + 4
+
+    def _segments(self):
+        segs = [("↑ " + fmt_speed(self.app.net.up), self.c_up),
+                ("↓ " + fmt_speed(self.app.net.down), self.c_down)]
+        if self.cfg.get("bar_show_balance", True):
+            w = self.app.week
+            if w:
+                segs.append((fmt_money(w["left"]), self.c_color(w["pct"])))
+            else:
+                segs.append(("$—", self.c_bal))
+        return segs
+
+    def c_color(self, pct):
+        if self.transparent:
+            base = self.c_bal
+            if pct >= 95:
+                return RED
+            if pct >= 80:
+                return "#b45309" if self.light else AMBER
+            return base
+        if not self.cfg.get("bar_dark", True):
+            return "#b45309" if pct >= 80 else self.c_bal
+        if pct >= 95:
+            return RED
+        if pct >= 80:
+            return AMBER
+        return self.c_bal
+
+    def render(self):
+        size = (self.w, self.h)
+        base = self.key_color if self.transparent else self.bg
+        if getattr(self, "_photo", None) is None:
+            self._pil = Image.new("RGB", size, base)
+            self._photo = ImageTk.PhotoImage(self._pil)
+            self.label = tk.Label(self, image=self._photo, bd=0,
+                                  bg=base, highlightthickness=0)
+            self.label.pack(fill="both", expand=True)
+            self.bind_events()
+        elif self._pil.size != size:
+            self._pil = Image.new("RGB", size, base)
+            self._photo = ImageTk.PhotoImage(self._pil)
+            self.label.config(image=self._photo)
+        self.label.config(bg=base)
+
+        d = ImageDraw.Draw(self._pil)
+        d.rectangle([0, 0, self.w - 1, self.h - 1], fill=base)
+        if not self.transparent:
+            inset = max(2, int(self.h * 0.08))
+            radius = max(4, int(self.h * 0.22))
+            d.rounded_rectangle([0, inset, self.w - 1, self.h - inset - 1],
+                                radius=radius, fill=self.bg)
+        cy = self.h // 2
+        segs = self._segments()
+        nets, bal = segs[:2], (segs[2] if len(segs) > 2 else None)
+        x = self.pad
+        if self.stack:
+            dy = max(6, int(self.h * 0.215))
+            for i, (text, color) in enumerate(nets):
+                d.text((x, cy - dy + i * dy * 2), text, font=self.f,
+                       fill=color, anchor="lm")
+            x += max(self.f.getlength(t) for t, _ in nets) + self.gap
+            if bal:
+                d.text((x, cy), bal[0], font=self.f, fill=bal[1], anchor="lm")
+        else:
+            for text, color in segs:
+                d.text((x, cy), text, font=self.f, fill=color, anchor="lm")
+                x += self.f.getlength(text) + self.gap
+        self._photo.paste(self._pil)
+
+    # ---------------- 位置
+
+    def place(self):
+        if self.mode == "taskbar":
+            m = taskbar_metrics()
+            if not m:
+                return
+            top, right, th = m
+            if th != self.h:
+                self.apply_theme()
+                self.render()
+            x = right - self.w - 8 + int(self.cfg.get("bar_dx") or 0)
+            y = top + int(self.cfg.get("bar_dy") or 0)
+        else:
+            x, y = self.cfg.get("bar_x"), self.cfg.get("bar_y")
+            if x is None or y is None:
+                x = self.winfo_screenwidth() - self.w - 80
+                y = self.winfo_screenheight() - 160
+            x, y = int(x), int(y)
+        if self._pos == (x, y, self.w, self.h):
+            return
+        self._pos = (x, y, self.w, self.h)
+        self.geometry(f"{self.w}x{self.h}+{x}+{y}")
+
+    def tick(self):
+        self.render()
+        self.place()
+        if self.mode == "taskbar":
+            self._n = getattr(self, "_n", 0) + 1
+            if self._n % 5 == 1:        # 别每帧都抢 band，够用且不闪
+                raise_over_taskbar(self.hwnd)
+            # 截图工具、任务栏重排会把它压到任务栏底下，掉下去就立刻抢回来
+            if window_covered(self.hwnd):
+                raise_over_taskbar(self.hwnd, force_top=True)
+
+    # ---------------- 交互
+
+    def bind_events(self):
+        targets = [self, getattr(self, "label", None)]
+        for w in targets:
+            if w is None:
+                continue
+            w.bind("<Button-3>", self.popup)
+            w.bind("<Double-Button-1>", lambda e: self.app.show())
+            w.bind("<Button-1>", self.drag_start)
+            w.bind("<B1-Motion>", self.drag_move)
+            w.bind("<ButtonRelease-1>", self.drag_end)
+
+    def popup(self, event):
+        self.app.build_menu()
+        self.app.menu.tk_popup(event.x_root, event.y_root)
+
+    def drag_start(self, event):
+        self._dx = event.x_root - self.winfo_x()
+        self._dy = event.y_root - self.winfo_y()
+
+    def drag_move(self, event):
+        if self.mode != "float":
+            return
+        self._pos = None
+        self.geometry(f"+{event.x_root - self._dx}+{event.y_root - self._dy}")
+
+    def drag_end(self, event):
+        if self.mode != "float":
+            return
+        self.cfg["bar_x"] = self.winfo_x()
+        self.cfg["bar_y"] = self.winfo_y()
+        save_config(self.cfg)
+        self._pos = None
+
+
+# ---------------------------------------------------------------- 设置窗口
+
+class SettingsWindow(tk.Toplevel):
+    """换 Key：管理多组「名称 / 地址 / Key」，选中即切换。"""
+
+    W = 404
+
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.cfg = app.cfg
+        self.f = app.f_zh
+        self.current = None
+        self.accounts = [dict(a) for a in (self.cfg.get("accounts") or [])]
+
+        self.overrideredirect(True)
+        self.configure(bg=BG)
+        self.attributes("-topmost", bool(self.cfg["topmost"]))
+        self.build()
+        self.place_near()
+        round_window(self)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.reload_list(select=self.cfg.get("active"))
+        if not self.accounts:
+            # 没有任何自建账号时，先用 magpie 的配置填好，改 Key 就能存
+            self.load_from_magpie()
+
+    # ---------------- 布局
+
+    def build(self):
+        outer = tk.Frame(self, bg=BG, highlightbackground=LINE, highlightthickness=1)
+        outer.pack(fill="both", expand=True)
+
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x", padx=14, pady=(12, 0))
+        tk.Label(head, text="设置 · 换 Key", bg=BG, fg=TEXT,
+                 font=(self.f, 10, "bold")).pack(side="left")
+        close = tk.Label(head, text="✕", bg=BG, fg=MUTED, font=(self.f, 10), cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: self.destroy())
+
+        tk.Label(outer, text="Key 只存在本机 config.json，不会上传",
+                 bg=BG, fg=MUTED, font=(self.f, 8), anchor="w").pack(fill="x", padx=14, pady=(2, 0))
+
+        wrap = tk.Frame(outer, bg=LINE, padx=1, pady=1)
+        wrap.pack(fill="x", padx=14, pady=(10, 0))
+        self.lst = tk.Listbox(wrap, bg=CARD, fg=TEXT, selectbackground="#2b303a",
+                              selectforeground=TEXT, font=(self.f, 9), bd=0,
+                              highlightthickness=0, activestyle="none", height=3,
+                              exportselection=False)
+        self.lst.pack(fill="both", expand=True)
+        self.lst.bind("<<ListboxSelect>>", self.on_pick)
+        self.lst.bind("<Double-Button-1>", lambda e: self.save())
+        self.lst.bind("<MouseWheel>",
+                      lambda e: self.lst.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        form = tk.Frame(outer, bg=BG)
+        form.pack(fill="x", padx=14, pady=(10, 0))
+        form.columnconfigure(1, weight=1)
+
+        self.e_name = self.field(form, 0, "名称")
+        self.e_name.configure(fg=TEXT)
+        self.e_base = self.field(form, 1, "地址")
+        self.e_key = self.field(form, 2, "Key", show="•")
+        self.e_key.bind("<Return>", lambda e: self.save())
+
+        self.lb_show = tk.Label(form, text="显示", bg=BG, fg=MUTED,
+                                font=(self.f, 8), cursor="hand2")
+        self.lb_show.grid(row=2, column=2, padx=(6, 0))
+        self.lb_show.bind("<Button-1>", lambda e: self.toggle_show())
+
+        row1 = tk.Frame(outer, bg=BG)
+        row1.pack(fill="x", padx=14, pady=(10, 0))
+        self.pill(row1, "从 magpie 读取", self.load_from_magpie).pack(side="left")
+        self.pill(row1, "清空", self.new_account).pack(side="left", padx=(6, 0))
+        self.pill(row1, "测试连接", self.test).pack(side="right")
+
+        qrow = tk.Frame(outer, bg=BG)
+        qrow.pack(fill="x", padx=14, pady=(9, 0))
+        tk.Label(qrow, text="每周额度 $", bg=BG, fg=MUTED,
+                 font=(self.f, 9)).pack(side="left")
+        qbox = tk.Frame(qrow, bg="#0f1115", highlightbackground=LINE, highlightthickness=1)
+        qbox.pack(side="left", padx=(6, 0))
+        self.e_quota = tk.Entry(qbox, bg="#0f1115", fg=TEXT, insertbackground=TEXT,
+                                relief="flat", bd=0, font=(self.f, 9),
+                                highlightthickness=0, width=7)
+        self.e_quota.pack(padx=8, pady=5)
+        self.e_quota.bind("<FocusIn>", lambda ev: qbox.config(highlightbackground=GREEN))
+        self.e_quota.bind("<FocusOut>", lambda ev: qbox.config(highlightbackground=LINE))
+        self.set_entry(self.e_quota, f"{float(self.cfg.get('week_quota') or 100):g}")
+        self.e_quota.bind("<Return>", self.apply_week_cfg)
+
+        wrow = tk.Frame(outer, bg=BG)
+        wrow.pack(fill="x", padx=14, pady=(6, 0))
+        tk.Label(wrow, text="本周已用 $", bg=BG, fg=MUTED,
+                 font=(self.f, 9)).pack(side="left")
+        wbox = tk.Frame(wrow, bg="#0f1115", highlightbackground=LINE, highlightthickness=1)
+        wbox.pack(side="left", padx=(6, 0))
+        self.e_spent = tk.Entry(wbox, bg="#0f1115", fg=MUTED, insertbackground=TEXT,
+                                readonlybackground="#0f1115", state="readonly",
+                                relief="flat", bd=0, font=(self.f, 9),
+                                highlightthickness=0, width=7)
+        self.e_spent.pack(padx=8, pady=5)
+        spent = self.app.week["spent"] if self.app.week else 0.0
+        self.set_entry(self.e_spent, f"{spent:.2f}")
+        tk.Label(wrow, text="额度 − 总池剩余", bg=BG, fg=MUTED,
+                 font=(self.f, 8)).pack(side="right")
+
+        self.lb_msg = tk.Label(outer, text="", bg=BG, fg=MUTED, font=(self.f, 8), anchor="w")
+        self.lb_msg.pack(fill="x", padx=14, pady=(8, 0))
+
+        foot = tk.Frame(outer, bg=BG)
+        foot.pack(fill="x", padx=14, pady=(8, 12))
+        self.pill(foot, "删除", self.delete, fg=RED).pack(side="left")
+        self.save_label = self.pill(foot, "保存并使用", self.save,
+                                    fg="#0f1115", bg=GREEN)
+        self.save_label.pack(side="right")
+
+        for w in (outer, head):
+            w.bind("<Button-1>", self.drag_start)
+            w.bind("<B1-Motion>", self.drag_move)
+
+        self.update_idletasks()
+        self.lst.config(height=max(1, min(4, len(self.accounts) or 1)))
+
+    def field(self, parent, row, label, show=None):
+        tk.Label(parent, text=label, bg=BG, fg=MUTED, font=(self.f, 9),
+                 anchor="w").grid(row=row, column=0, sticky="w", pady=4, padx=(0, 9))
+        box = tk.Frame(parent, bg="#0f1115", highlightbackground=LINE,
+                       highlightthickness=1)
+        box.grid(row=row, column=1, sticky="we", pady=4)
+        e = tk.Entry(box, bg="#0f1115", fg=TEXT, insertbackground=TEXT,
+                     relief="flat", bd=0, font=(self.f, 9), highlightthickness=0)
+        if show:
+            e.config(show=show)
+        e.pack(fill="x", padx=8, pady=6)
+        e.bind("<FocusIn>", lambda ev: box.config(highlightbackground=GREEN))
+        e.bind("<FocusOut>", lambda ev: box.config(highlightbackground=LINE))
+        return e
+
+    def pill(self, parent, text, cmd, fg=TEXT, bg=CARD):
+        lb = tk.Label(parent, text=text, bg=bg, fg=fg, font=(self.f, 9),
+                      padx=12, pady=5, cursor="hand2")
+        dark = fg == "#0f1115"
+        lb.bind("<Button-1>", lambda e: cmd())
+        lb.bind("<Enter>", lambda e: lb.config(bg="#3ee5ac" if dark else "#2b303a"))
+        lb.bind("<Leave>", lambda e: lb.config(bg=bg))
+        return lb
+
+    def place_near(self):
+        self.update_idletasks()
+        h = self.winfo_reqheight()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        rx, ry = self.app.root.winfo_x(), self.app.root.winfo_y()
+        x = rx - self.W - 14
+        if x < 8:
+            x = rx + self.app.w + 14
+        if x + self.W > sw - 8:
+            x = max(8, (sw - self.W) // 2)
+        y = max(8, min(ry, sh - h - 80))
+        self.geometry(f"{self.W}x{h}+{x}+{y}")
+        self.update_idletasks()
+
+    def drag_start(self, event):
+        self._dx = event.x_root - self.winfo_x()
+        self._dy = event.y_root - self.winfo_y()
+
+    def drag_move(self, event):
+        self.geometry(f"+{event.x_root - self._dx}+{event.y_root - self._dy}")
+
+    # ---------------- 交互
+
+    def set_entry(self, entry, value):
+        try:
+            ro = entry.cget("state") == "readonly"
+        except Exception:
+            ro = False
+        if ro:
+            entry.config(state="normal")
+        entry.delete(0, "end")
+        entry.insert(0, value or "")
+        if ro:
+            entry.config(state="readonly")
+
+    def toggle_show(self):
+        self.shown = not getattr(self, "shown", False)
+        self.e_key.config(show="" if self.shown else "•")
+        self.lb_show.config(text="隐藏" if self.shown else "显示",
+                            fg=TEXT if self.shown else MUTED)
+
+    def msg(self, text, color=MUTED):
+        try:
+            self.lb_msg.config(text=text, fg=color)
+        except Exception:
+            pass
+
+    def reload_list(self, select=None):
+        act = self.cfg.get("active")
+        self.lst.delete(0, "end")
+        if not self.accounts:
+            self.lst.insert("end", "  还没有账号 · 点「从 magpie 读取」")
+            self.lst.itemconfig(0, fg=MUTED)
+            self.lst.config(height=1)
+            return
+        for acc in self.accounts:
+            mark = "●" if acc["name"] == act else "○"
+            self.lst.insert("end", f"  {mark}  {acc['name']}      {mask_key(acc['key'])}")
+        self.lst.config(height=max(1, min(4, len(self.accounts))))
+        idx = next((i for i, a in enumerate(self.accounts) if a["name"] == select), None)
+        if idx is not None:
+            self.lst.selection_clear(0, "end")
+            self.lst.selection_set(idx)
+            self.lst.see(idx)
+            self.fill_form(self.accounts[idx])
+
+    def on_pick(self, event=None):
+        sel = self.lst.curselection()
+        if not sel or sel[0] >= len(self.accounts):
+            return
+        self.fill_form(self.accounts[sel[0]])
+
+    def fill_form(self, acc):
+        self.current = acc.get("name")
+        self.set_entry(self.e_name, acc.get("name"))
+        self.set_entry(self.e_base, acc.get("base"))
+        self.set_entry(self.e_key, acc.get("key"))
+        self.msg("")
+
+    def new_account(self):
+        self.current = None
+        for e in (self.e_name, self.e_base, self.e_key):
+            self.set_entry(e, "")
+        self.lst.selection_clear(0, "end")
+        self.msg("填好后点「保存并使用」")
+
+    def load_from_magpie(self):
+        try:
+            base, key = read_credentials(self.cfg.get("provider"))
+        except Exception as exc:
+            self.msg(f"读取失败：{exc}", RED)
+            return
+        self.current = None
+        self.set_entry(self.e_name, self.cfg.get("provider") or "magpie")
+        self.set_entry(self.e_base, base)
+        self.set_entry(self.e_key, key)
+        self.msg("已填入 magpie 的当前配置，保存后即独立")
+
+    def test(self):
+        base = norm_base(self.e_base.get())
+        key = self.e_key.get().strip()
+        if not base or not key:
+            self.msg("先填地址和 Key", RED)
+            return
+        self.msg("测试中…")
+
+        def work():
+            try:
+                d = query_balance(base, key)
+                text = f"✓ 可用 · 总额 ${d['total']:,.2f} · 剩余 ${d['left']:,.2f}"
+                color = GREEN
+            except Exception as exc:
+                text, color = f"✗ {self.app.short_error(str(exc))}", RED
+            self.after(0, lambda: self.msg(text, color))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_week_cfg(self, event=None):
+        """回车即生效，不用改账号也能调额度。"""
+        note = self.apply_week_inputs(silent=True)
+        if note:
+            self.msg("已生效  ·  " + note, GREEN)
+            self.app.refresh()
+
+    def apply_week_inputs(self, silent=False):
+        """把「每周额度」落到配置并立即重绘。返回变更摘要。"""
+        notes = []
+        try:
+            q = float(self.e_quota.get().strip() or 0)
+            if q > 0 and abs(q - float(self.cfg.get("week_quota") or 0)) > 1e-9:
+                self.app.set_week_quota(q)
+                notes.append(f"额度 ${q:,.0f}")
+        except Exception:
+            if not silent:
+                self.msg("每周额度要填数字", RED)
+                return ""
+        self.app.repaint()
+        spent = self.app.week["spent"] if self.app.week else 0.0
+        self.set_entry(self.e_spent, f"{spent:.2f}")
+        return "，".join(notes)
+
+    def save(self):
+        try:
+            self._save()
+        except Exception as exc:                     # 出错要看得见，别静默失败
+            self.msg("保存失败：" + str(exc)[:36], RED)
+
+    def _save(self):
+        name = self.e_name.get().strip()
+        base = norm_base(self.e_base.get())
+        key = self.e_key.get().strip()
+        if not name or not base or not key:
+            self.msg("名称、地址、Key 都要填", RED)
+            return
+        if not base.startswith("http"):
+            self.msg("地址要以 http:// 或 https:// 开头", RED)
+            return
+
+        item = {"name": name, "base": base, "key": key}
+        names = {n for n in (self.current, name) if n}
+        idx = next((i for i, a in enumerate(self.accounts) if a["name"] in names), None)
+        if idx is None:
+            self.accounts.append(item)
+        else:
+            self.accounts[idx] = item
+
+        self.cfg["accounts"] = self.accounts
+        self.cfg["active"] = name
+        save_config(self.cfg)
+        self.current = name
+        self.reload_list(select=name)
+
+        note = self.apply_week_inputs()
+        short = name if len(name) <= 18 else name[:17] + "…"
+        self.msg("已保存：" + short + ("  ·  " + note if note else ""), GREEN)
+        self.app.update_title()
+        self.app.repaint()
+        self.app.refresh()
+
+    def delete(self):
+        name = self.current
+        if not name:
+            self.msg("先在列表里选一个账号", RED)
+            return
+        self.accounts = [a for a in self.accounts if a["name"] != name]
+        self.cfg["accounts"] = self.accounts
+        if self.cfg.get("active") == name:
+            self.cfg["active"] = None
+        save_config(self.cfg)
+        self.current = None
+        for e in (self.e_name, self.e_base, self.e_key):
+            self.set_entry(e, "")
+        self.reload_list(select=self.cfg.get("active"))
+        tail = "，回退到 magpie 读取" if not self.cfg.get("active") else ""
+        self.msg(f"已删除 {name}{tail}")
+        self.app.update_title()
+        self.app.refresh()
+
+
+# ---------------------------------------------------------------- 入口
+
+def single_instance():
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\RelayBalanceWidget")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        return False, handle
+    return True, handle
+
+
+def main():
+    if "--check" in sys.argv:
+        cfg = load_config()
+        pid = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
+        if pid:
+            cfg["provider"] = pid
+            cfg["active"] = None
+        data = fetch_balance(cfg)
+        quota = float(cfg.get("week_quota") or 100.0)
+        pool = data["left"]
+        spent = max(0.0, quota - pool)
+        pct = (spent / quota * 100) if quota else 0.0
+        print(f"来源 {data.get('source')}")
+        print(f"本周 {week_key()} 已用 ${spent:,.2f} / ${quota:,.0f}（{pct:.1f}%），"
+              f"剩 ${pool:,.2f}")
+        print(f"总池 ${data['total']:,.2f} · 累计已用 ${data['used']:,.2f} · "
+              f"剩 ${data['left']:,.2f}")
+        return 0
+
+    ok, handle = single_instance()
+    if not ok:
+        print("已经在运行了")
+        return 0
+    try:
+        Widget().run()
+    finally:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

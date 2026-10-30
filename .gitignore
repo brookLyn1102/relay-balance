@@ -1,0 +1,10 @@
+# 依赖
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 本地配置（含账号地址与 Key，绝不入库）
+config.json
+config.*.bak
+*.log

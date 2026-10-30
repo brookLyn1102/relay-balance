@@ -1,0 +1,22 @@
+{
+  "provider": null,
+  "interval": 600,
+  "topmost": true,
+  "x": null,
+  "y": null,
+  "autostart": false,
+  "accounts": [],
+  "active": null,
+  "week_quota": 100.0,
+  "week_key": null,
+  "net_panel": true,
+  "bar_mode": "taskbar",
+  "bar_dx": 0,
+  "bar_dy": 0,
+  "bar_show_balance": true,
+  "bar_dark": true,
+  "bar_transparent": true,
+  "bar_stack": true,
+  "bar_x": null,
+  "bar_y": null
+}
