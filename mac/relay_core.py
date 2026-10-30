@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "menu_balance": True,    # 菜单栏标题里显示余额
     "panel_token": True,     # 面板里显示今日 token
     "menu_token": True,      # 菜单栏标题里显示今日 token
+    "menu_mem": True,        # 菜单栏标题里显示剩余内存
 }
 
 INTERVALS = [
@@ -314,6 +315,39 @@ def fmt_speed_short(v):
     if v < 1024 ** 2:
         return f"{v / 1024:.0f}K"
     return f"{v / 1024 ** 2:.1f}M"
+
+
+# ---------------------------------------------------------------- 内存
+
+_MEM = {"t": 0.0, "gb": None, "pct": None}
+
+
+def mem_status():
+    """(可用 GB, 已用百分比)。macOS 的 available 已含可回收缓存。"""
+    if psutil is None:
+        return None, None
+    now = time.time()
+    if _MEM["gb"] is not None and now - _MEM["t"] < 4.0:   # 4 秒内复用
+        return _MEM["gb"], _MEM["pct"]
+    try:
+        vm = psutil.virtual_memory()
+        gb = vm.available / (1024.0 ** 3)
+        pct = float(vm.percent)
+    except Exception:
+        gb = pct = None
+    _MEM.update(t=now, gb=gb, pct=pct)
+    return gb, pct
+
+
+def fmt_mem(gb):
+    """菜单栏用：6.4G / 512M。"""
+    if gb is None:
+        return "—"
+    if gb < 1:
+        return f"{gb * 1024:.0f}M"
+    if gb >= 10:
+        return f"{gb:.0f}G"
+    return f"{gb:.1f}G"
 
 
 # ---------------------------------------------------------------- 网速

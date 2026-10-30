@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """中转管家 · 菜单栏（macOS 版）
 
-菜单栏右侧显示 `↑12K ↓3.4M $64.43`（可关掉其中任一项），点开是菜单：
-显示面板 / 立即刷新 / 刷新间隔 / 开机自启 / 退出。
+菜单栏右侧显示 `↑12K ↓3.4M $64.43 1.0M tok 内存 6.4G`（每一项都能关掉），
+点开是菜单：显示面板 / 立即刷新 / 刷新间隔 / 开机自启 / 退出。
 
 面板是另一个进程（relay_panel.py），这里负责开关它。
 """
@@ -36,6 +36,7 @@ class MenuBarApp(rumps.App):
         self.busy = False
         self.panel = None
         self.last_at = 0.0
+        self.mem_gb, self.mem_pct = core.mem_status()   # 先取一次，别让标题闪「—」
 
         self.mi_panel = rumps.MenuItem("显示面板", callback=self.toggle_panel)
         self.interval_item = self.interval_menu()
@@ -53,6 +54,8 @@ class MenuBarApp(rumps.App):
                            state=self.cfg.get("menu_balance", True)),
             rumps.MenuItem("菜单栏显示今日 token", callback=self.toggle_token,
                            state=self.cfg.get("menu_token", True)),
+            rumps.MenuItem("菜单栏显示剩余内存", callback=self.toggle_mem,
+                           state=self.cfg.get("menu_mem", True)),
             None,
             rumps.MenuItem("开机自启", callback=self.toggle_autostart,
                            state=self.autostart_on()),
@@ -109,6 +112,12 @@ class MenuBarApp(rumps.App):
         core.save_config(self.cfg)
         self.update_title()
 
+    def toggle_mem(self, sender):
+        self.cfg["menu_mem"] = not self.cfg.get("menu_mem", True)
+        sender.state = self.cfg["menu_mem"]
+        core.save_config(self.cfg)
+        self.update_title()
+
     def force_refresh(self, _sender=None):
         self.refresh()
 
@@ -160,6 +169,8 @@ class MenuBarApp(rumps.App):
 
     def on_second(self, _sender):
         self.net.sample()
+        if self.cfg.get("menu_mem", True):
+            self.mem_gb, self.mem_pct = core.mem_status()
         self._tok_tick = getattr(self, "_tok_tick", 0) + 1
         if self._tok_tick % 5 == 1:              # 每 5 秒读一次日志增量
             try:
@@ -187,6 +198,8 @@ class MenuBarApp(rumps.App):
             total = (t.get("in", 0) or 0) + (t.get("out", 0) or 0)
             if total:
                 parts.append(f"{usage.fmt_tokens(total)} tok")
+        if self.cfg.get("menu_mem", True):
+            parts.append(f"内存 {core.fmt_mem(getattr(self, 'mem_gb', None))}")
         self.title = "  ".join(parts) if parts else core.APP_NAME
 
     # ------------------------------------------------------------ 自启
