@@ -30,6 +30,11 @@ try:
 except Exception:                                    # 没装 psutil 时网速功能自动隐藏
     psutil = None
 
+try:
+    from taskbar_strip import TaskbarStrip
+except Exception:                                    # 新条不可用时回退 Tk 版
+    TaskbarStrip = None
+
 APP_NAME = "中转管家"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -721,12 +726,22 @@ class Widget:
         save_config(self.cfg)
         self.destroy_strip()
         if mode != "off" and psutil is not None:
-            try:
-                self.strip = TrafficStrip(self, mode)
-            except Exception:
-                self.strip = None
+            self.strip = self.make_strip(mode)
         self.build_menu()
         self.refresh_tray_menu()
+
+    def make_strip(self, mode):
+        """贴任务栏用纯 Win32 子窗口（挂进任务栏，不会被覆盖）；
+        悬浮条还是用 Tk 的置顶小窗。"""
+        if mode == "taskbar" and TaskbarStrip is not None:
+            try:
+                return TaskbarStrip(self, fmt_speed, fmt_money)
+            except Exception:
+                pass
+        try:
+            return TrafficStrip(self, mode)
+        except Exception:
+            return None
 
     def destroy_strip(self):
         if self.strip is not None:
