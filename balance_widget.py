@@ -1358,6 +1358,8 @@ class TrafficStrip(tk.Toplevel):
             else:
                 self.fg, self.c_up, self.c_down = "#e8eaed", "#5aa9ff", "#34d399"
             self.c_bal = self.fg
+            self.c_good, self.c_warn, self.c_bad = (
+                ("#059669", "#b45309", "#dc2626") if self.light else ("#34d399", AMBER, RED))
             try:
                 self.attributes("-transparentcolor", self.key_color)
             except Exception:
@@ -1368,9 +1370,11 @@ class TrafficStrip(tk.Toplevel):
             if dark:
                 self.bg, self.fg = BG, "#e8eaed"      # 跟右键菜单同一底色
                 self.c_up, self.c_down, self.c_bal = "#5aa9ff", "#34d399", "#e8eaed"
+                self.c_good, self.c_warn, self.c_bad = "#34d399", AMBER, RED
             else:
                 self.bg, self.fg = "#f4f5f7", "#1a1d23"
                 self.c_up, self.c_down, self.c_bal = "#2563eb", "#059669", "#111827"
+                self.c_good, self.c_warn, self.c_bad = "#059669", "#b45309", "#dc2626"
         try:
             self.configure(bg=self.bg)      # 窗口自身底色也跟上，resize 瞬间不露馅
         except Exception:
@@ -1411,20 +1415,12 @@ class TrafficStrip(tk.Toplevel):
         return segs
 
     def c_color(self, pct):
-        if self.transparent:
-            base = self.c_bal
-            if pct >= 95:
-                return RED
-            if pct >= 80:
-                return "#b45309" if self.light else AMBER
-            return base
-        if not self.cfg.get("bar_dark", True):
-            return "#b45309" if pct >= 80 else self.c_bal
+        """和面板进度条同一套阈值：<80 绿、<95 琥珀、≥95 红。"""
         if pct >= 95:
-            return RED
+            return self.c_bad
         if pct >= 80:
-            return AMBER
-        return self.c_bal
+            return self.c_warn
+        return self.c_good
 
     def render(self):
         size = (self.w, self.h)

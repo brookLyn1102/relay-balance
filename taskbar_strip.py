@@ -367,14 +367,19 @@ class TaskbarStrip:
             self.c_up = "#2563eb" if light else "#5aa9ff"
             self.c_down = "#059669" if light else "#34d399"
             self.c_dim = "#7c8592" if light else "#8b95a3"
+            self.c_good = "#059669" if light else "#34d399"
+            self.c_warn = "#b45309" if light else "#fbbf24"
+            self.c_bad = "#dc2626" if light else "#f87171"
         else:
             dark = bool(self.cfg.get("bar_dark", True))
             if dark:
                 self.bg, self.fg = "#12151a", "#e8eaed"
                 self.c_up, self.c_down = "#5aa9ff", "#34d399"
+                self.c_good, self.c_warn, self.c_bad = "#34d399", "#f5b544", "#f87171"
             else:
                 self.bg, self.fg = "#f4f5f7", "#1a1d23"
                 self.c_up, self.c_down = "#2563eb", "#059669"
+                self.c_good, self.c_warn, self.c_bad = "#059669", "#b45309", "#dc2626"
             self.c_dim = "#8b95a3" if dark else "#7c8592"
         self._colors = True
 
@@ -490,6 +495,14 @@ class TaskbarStrip:
         total = (t.get("in") or 0) + (t.get("out") or 0)
         return (_fmt_tok(total) + " tok") if total else ""
 
+    def _pct_color(self, pct):
+        """和面板进度条同一套阈值：<80 绿、<95 琥珀、≥95 红。"""
+        if pct >= 95:
+            return self.c_bad
+        if pct >= 80:
+            return self.c_warn
+        return self.c_good
+
     def _draw_sep(self, mem, x, h):
         """画一条贯穿两行的竖线（比字符 | 长，视觉上才像分隔），返回下一列起点。"""
         left = x + self._sep_gap
@@ -514,24 +527,19 @@ class TaskbarStrip:
             if pct is not None:
                 color = self.fg
                 if pct >= 90:
-                    color = "#dc2626"
+                    color = self.c_bad
                 elif pct >= 80:
-                    color = "#b45309" if self._light else "#fbbf24"
+                    color = self.c_warn
                 mid = [(f"{pct:.0f}%", color), ("MEM", self.c_dim)]
 
         right = []
         if self.cfg.get("bar_show_balance", True):
             w = getattr(self.app, "week", None)
             if w:
-                pct = w.get("pct") or 0
-                color = self.fg
-                if pct >= 95:
-                    color = "#dc2626"
-                elif pct >= 80:
-                    color = "#b45309" if self._light else "#fbbf24"
-                right.append((self._fm(w.get("left"), False), color))
+                right.append((self._fm(w.get("left"), False),
+                              self._pct_color(w.get("pct") or 0)))
             else:
-                right.append(("$—", self.fg))
+                right.append(("$—", self.c_dim))
         if self.cfg.get("bar_show_token", True):
             tok = self._tok_text()
             if tok:
