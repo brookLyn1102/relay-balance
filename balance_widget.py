@@ -1107,6 +1107,8 @@ class TrafficStrip(tk.Toplevel):
         self.hwnd = as_tool_window(self)
         if self.mode == "taskbar":
             raise_over_taskbar(self.hwnd)
+            self._guard_hits = 0
+            self._guard()
 
     # ---------------- 外观
 
@@ -1262,9 +1264,32 @@ class TrafficStrip(tk.Toplevel):
             self._n = getattr(self, "_n", 0) + 1
             if self._n % 5 == 1:        # 别每帧都抢 band，够用且不闪
                 raise_over_taskbar(self.hwnd)
-            # 截图工具、任务栏重排会把它压到任务栏底下，掉下去就立刻抢回来
+        # 遮挡检测交给 _guard 高频跑，这里不管
+
+    def _guard(self):
+        """高频保活：鼠标悬停任务栏图标时，Windows 弹缩略图预览并把任务栏
+        重新提到最顶层，贴在任务栏上的条会被压下去。主 tick 一秒才查一次，
+        那一段就是肉眼看到的「短暂消失」。这里用 200ms 查一次，刚被压过
+        之后连续几次提到 70ms，闪烁基本看不出来。
+        """
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
             if window_covered(self.hwnd):
                 raise_over_taskbar(self.hwnd, force_top=True)
+                self._guard_hits = 8
+            elif self._guard_hits > 0:
+                self._guard_hits -= 1
+        except Exception:
+            pass
+        delay = 70 if self._guard_hits > 0 else 200
+        try:
+            self.after(delay, self._guard)
+        except Exception:
+            pass
 
     # ---------------- 交互
 
