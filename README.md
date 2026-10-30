@@ -12,7 +12,11 @@
 
 ![设置](preview-settings.png)
 
-> macOS 版在 [`mac/`](mac/) 目录，形态换成「菜单栏文字 + 置顶面板」，见 [mac/README.md](mac/README.md)。
+> macOS 有两个版本：
+> - [`mac-native/`](mac-native/) — **Swift + SwiftUI 原生版**（推荐，无 Python 依赖，`./scripts/build-app.sh` 一键出 .app）
+> - [`mac/`](mac/) — Python 版（rumps + tkinter），留作备用
+>
+> 两者共用同一份 `~/.config/relay-balance/config.json`，可以随时切换。
 
 ## 功能
 

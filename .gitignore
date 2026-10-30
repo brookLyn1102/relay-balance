@@ -8,3 +8,8 @@ venv/
 config.json
 config.*.bak
 *.log
+
+# Swift 构建产物
+.build/
+.swiftpm/
+*.xcodeproj

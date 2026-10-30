@@ -1,0 +1,207 @@
+import Foundation
+import SwiftUI
+
+final class Model: ObservableObject {
+    @Published var cfg: Config
+    @Published var balance: Balance?
+    @Published var week: WeekStat?
+    @Published var todayTok: DayAgg?
+    @Published var mem: MemInfo?
+    @Published var up: Double = 0
+    @Published var down: Double = 0
+    @Published var busy = false
+    @Published var statusText = "正在读取…"
+    @Published var statusKind: StatusKind = .muted
+    @Published var nightIdle = false
+
+    enum StatusKind {
+        case muted, good, warn, bad
+    }
+
+    let net = NetMeter()
+    private var timer: Timer?
+    private var lastAt: Date?
+    private var tickCount = 0
+
+    /// 标题 / 菜单需要跟着刷新时回调
+    var onChange: (() -> Void)?
+
+    init() {
+        cfg = ConfigStore.load()
+    }
+
+    func start() {
+        net.sample()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.onSecond()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        // 启动先查一次；夜间就不打扰了
+        if inNight(cfg) {
+            nightIdle = true
+            statusText = "夜间暂停 \(fmtHM(cfg.nightFrom))–\(fmtHM(cfg.nightTo))"
+            statusKind = .muted
+        } else {
+            refresh()
+        }
+    }
+
+    // MARK: 每秒
+
+    private func onSecond() {
+        net.sample()
+        up = net.up
+        down = net.down
+
+        tickCount += 1
+        if tickCount % 5 == 1 {
+            if cfg.panelToken {
+                todayTok = UsageReader.shared.todayLive()
+            }
+            if cfg.menuMem {
+                mem = readMem()
+            }
+        }
+
+        if inNight(cfg) {
+            if !nightIdle {
+                nightIdle = true
+                statusText = "夜间暂停 \(fmtHM(cfg.nightFrom))–\(fmtHM(cfg.nightTo))"
+                statusKind = .muted
+            }
+            onChange?()
+            return
+        }
+        if nightIdle {
+            nightIdle = false
+            statusText = "已恢复刷新"
+        }
+
+        if let last = lastAt, Date().timeIntervalSince(last) >= Double(cfg.interval), !busy {
+            refresh()
+        }
+        onChange?()
+    }
+
+    // MARK: 刷新
+
+    func refresh() {
+        if busy { return }
+        busy = true
+        statusText = "刷新中…"
+        statusKind = .muted
+        let snapshot = cfg
+
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                let data = try fetchBalance(snapshot)
+                DispatchQueue.main.async { self.apply(data) }
+            } catch {
+                let msg = error.localizedDescription
+                DispatchQueue.main.async { self.applyError(msg) }
+            }
+        }
+    }
+
+    private func apply(_ data: Balance) {
+        busy = false
+        balance = data
+        let w = weekSplit(cfg, pool: data.left)
+        week = w
+        cfg.weekKey = weekKey()
+        lastAt = Date()
+        statusText = clockText(data.at)
+        statusKind = w.pct >= 95 ? .bad : (w.pct >= 80 ? .warn : .good)
+        onChange?()
+    }
+
+    private func applyError(_ message: String) {
+        busy = false
+        lastAt = Date()
+        statusText = shortError(message)
+        statusKind = .bad
+        onChange?()
+    }
+
+    func clockText(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date) + " 刷新"
+    }
+
+    func shortError(_ msg: String) -> String {
+        let low = msg.lowercased()
+        if low.contains("timed out") || low.contains("超时") { return "超时，稍后再试" }
+        if low.contains("401") || low.contains("unauthorized") { return "密钥无效" }
+        if low.contains("404") { return "中转没有计费接口" }
+        if low.contains("magpie") || low.contains("配置") { return "读不到 magpie 配置" }
+        if low.contains("offline") || low.contains("internet") { return "网络不通" }
+        return String(msg.prefix(28))
+    }
+
+    // MARK: 配置
+
+    func save() {
+        ConfigStore.save(cfg)
+        onChange?()
+    }
+
+    func setInterval(_ seconds: Int) {
+        cfg.interval = seconds
+        save()
+        if !nightIdle { refresh() }
+    }
+
+    func toggleNight() {
+        cfg.nightPause.toggle()
+        save()
+        if cfg.nightPause {
+            nightIdle = false
+        } else {
+            nightIdle = false
+            refresh()
+        }
+    }
+
+    func sourceName() -> String {
+        if let acc = activeAccount(cfg) { return acc.name }
+        return cfg.provider.map { "magpie · \($0)" } ?? "magpie"
+    }
+
+    /// 面板进度条同一套阈值
+    func pctColor(_ pct: Double) -> Color {
+        if pct >= 95 { return Color(hex: "#f87171") }
+        if pct >= 80 { return Color(hex: "#f5b544") }
+        return Color(hex: "#34d399")
+    }
+
+    var statusColor: Color {
+        switch statusKind {
+        case .muted: return Color(hex: "#8b93a1")
+        case .good: return Color(hex: "#34d399")
+        case .warn: return Color(hex: "#f5b544")
+        case .bad: return Color(hex: "#f87171")
+        }
+    }
+
+    var todayText: String? {
+        guard let t = todayTok, t.req > 0 else { return nil }
+        return "今日 \(fmtTokens(t.total)) tok · \(t.req) 次"
+    }
+}
+
+// MARK: - 颜色
+
+extension Color {
+    init(hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        var value: UInt64 = 0
+        Scanner(string: s).scanHexInt64(&value)
+        let r = Double((value >> 16) & 0xFF) / 255
+        let g = Double((value >> 8) & 0xFF) / 255
+        let b = Double(value & 0xFF) / 255
+        self.init(red: r, green: g, blue: b)
+    }
+}
