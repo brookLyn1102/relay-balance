@@ -115,6 +115,17 @@ class Panel:
         self.lb_gear.pack(side="right", padx=(0, 8))
         self.lb_gear.bind("<Button-1>", lambda e: self.open_settings())
 
+        # 手动刷新：小圆圈包一个 ↻，hover 变亮，刷新中变绿
+        self.btn_refresh = tk.Canvas(head, width=18, height=18, bg=BG,
+                                     highlightthickness=0, cursor="hand2")
+        self._rf_ring = self.btn_refresh.create_oval(1, 1, 17, 17, outline="#3a4150", width=1)
+        self._rf_txt = self.btn_refresh.create_text(9, 9, text="↻", fill=MUTED,
+                                                    font=(ZH, 11))
+        self.btn_refresh.pack(side="right", padx=(0, 6), pady=(1, 0))
+        self.btn_refresh.bind("<Button-1>", lambda e: self.refresh())
+        self.btn_refresh.bind("<Enter>", lambda e: self._rf_style("hover"))
+        self.btn_refresh.bind("<Leave>", lambda e: self._rf_style("idle"))
+
         row = tk.Frame(outer, bg=BG)
         row.pack(fill="x", pady=(6, 0))
         self.lb_left = tk.Label(row, text="—", bg=BG, fg=TEXT, font=self.f_num,
@@ -208,11 +219,24 @@ class Panel:
 
     # ------------------------------------------------------------ 刷新
 
+    def _rf_style(self, state):
+        """刷新按钮三态：平时淡、hover 亮、刷新中变绿。"""
+        if self.busy and state != "busy":
+            return
+        ring, txt = {"idle": ("#3a4150", MUTED), "hover": (MUTED, TEXT),
+                     "busy": (GREEN, GREEN)}.get(state, ("#3a4150", MUTED))
+        try:
+            self.btn_refresh.itemconfig(self._rf_ring, outline=ring)
+            self.btn_refresh.itemconfig(self._rf_txt, fill=txt)
+        except Exception:
+            pass
+
     def refresh(self):
         if self.busy:
             return
         self.busy = True
         self.busy_since = time.time()
+        self._rf_style("busy")
         self.lb_status.config(text="刷新中…", fg=MUTED)
         cfg = dict(self.cfg)
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
@@ -232,11 +256,13 @@ class Panel:
             pass
         if self.busy and time.time() - self.busy_since > 25:
             self.busy = False
+            self._rf_style("idle")
             self.lb_status.config(text="查询超时，稍后重试", fg=AMBER)
         self.root.after(150, self.poll)
 
     def apply(self, data, error):
         self.busy = False
+        self._rf_style("idle")
         if error:
             self.ok = False
             self.dot.itemconfig(1, fill=RED)

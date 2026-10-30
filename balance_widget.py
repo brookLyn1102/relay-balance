@@ -704,10 +704,16 @@ class Widget:
         self.btn_gear.bind("<Enter>", lambda e: self.btn_gear.config(fg=TEXT))
         self.btn_gear.bind("<Leave>", lambda e: self.btn_gear.config(fg=MUTED))
 
-        self.btn_refresh = tk.Label(head, text="↻", bg=BG, fg=MUTED,
-                                    font=(self.f_zh, 11), cursor="hand2")
-        self.btn_refresh.pack(side="right", padx=(0, 10), pady=(0, 0))
+        # 手动刷新：小圆圈包一个 ↻，hover 变亮，刷新中变绿
+        self.btn_refresh = tk.Canvas(head, width=20, height=20, bg=BG,
+                                     highlightthickness=0, cursor="hand2")
+        self._rf_ring = self.btn_refresh.create_oval(1, 1, 19, 19, outline="#3a4150", width=1)
+        self._rf_txt = self.btn_refresh.create_text(10, 10, text="↻", fill=MUTED,
+                                                   font=("Segoe UI Symbol", 9))
+        self.btn_refresh.pack(side="right", padx=(0, 9), pady=(2, 0))
         self.btn_refresh.bind("<Button-1>", lambda e: self.refresh())
+        self.btn_refresh.bind("<Enter>", lambda e: self._rf_style("hover"))
+        self.btn_refresh.bind("<Leave>", lambda e: self._rf_style("idle"))
 
         body = tk.Frame(outer, bg=BG)
         body.pack(fill="x", padx=16, pady=(8, 0))
@@ -1133,11 +1139,24 @@ class Widget:
 
     # ---------------- 刷新
 
+    def _rf_style(self, state):
+        """刷新按钮的三态：平时淡、hover 亮、刷新中变绿。"""
+        if self.busy and state != "busy":
+            return
+        ring, txt = {"idle": ("#3a4150", MUTED), "hover": (MUTED, TEXT),
+                     "busy": (GREEN, GREEN)}.get(state, ("#3a4150", MUTED))
+        try:
+            self.btn_refresh.itemconfig(self._rf_ring, outline=ring)
+            self.btn_refresh.itemconfig(self._rf_txt, fill=txt)
+        except Exception:
+            pass
+
     def refresh(self):
         if self.busy:
             return
         self.busy = True
         self.busy_since = time.time()
+        self._rf_style("busy")
         self.lb_status.config(text="刷新中…", fg=MUTED)
         threading.Thread(target=self._worker, daemon=True).start()
 
@@ -1158,11 +1177,13 @@ class Widget:
             self.apply(data, err)
         if self.busy and time.time() - self.busy_since > 25:
             self.busy = False
+            self._rf_style("idle")
             self.lb_status.config(text="查询超时，稍后重试", fg=AMBER)
 
 
     def apply(self, data, error):
         self.busy = False
+        self._rf_style("idle")
         if error:
             self.ok = False
             self.dot.itemconfig(1, fill=RED)
