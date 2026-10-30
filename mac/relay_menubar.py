@@ -64,18 +64,22 @@ class MenuBarApp(rumps.App):
 
     def interval_menu(self):
         items = []
+        self.interval_items = {}
         for sec, label in core.INTERVALS:
             item = rumps.MenuItem(label, callback=self.make_set_interval(sec))
             item.state = self.cfg["interval"] == sec
             items.append(item)
+            self.interval_items[label] = item
         return rumps.MenuItem("刷新间隔", items)
 
     def make_set_interval(self, sec):
+        label = next(l for s, l in core.INTERVALS if s == sec)
+
         def handler(_sender):
             self.cfg["interval"] = int(sec)
             core.save_config(self.cfg)
-            for label, item in self.interval_item.items():
-                item.state = (label == next(l for s, l in core.INTERVALS if s == sec))
+            for name, item in self.interval_items.items():
+                item.state = (name == label)
             self.refresh()
         return handler
 

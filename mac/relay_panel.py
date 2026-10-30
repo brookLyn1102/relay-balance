@@ -19,7 +19,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -615,11 +614,14 @@ class SettingsWindow(tk.Toplevel):
 
     def refresh_spent(self):
         week = getattr(self.app, "week", None)
-        if week:
-            self.lb_spent.config(text=f"${week['spent']:,.2f}")
-        else:
-            self.lb_spent.config(text="—")
-        self.after(2000, self.refresh_spent)
+        try:
+            if week:
+                self.lb_spent.config(text=f"${week['spent']:,.2f}")
+            else:
+                self.lb_spent.config(text="—")
+            self.after(2000, self.refresh_spent)
+        except Exception:
+            pass
 
     def msg(self, text, color=MUTED):
         self.lb_msg.config(text=text, fg=color)
