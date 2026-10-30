@@ -53,6 +53,7 @@ DT_SINGLELINE = 0x0020
 DT_VCENTER = 0x0004
 DT_LEFT = 0x0000
 DT_RIGHT = 0x0002
+DT_CENTER = 0x0001
 DT_NOPREFIX = 0x0800
 SRCCOPY = 0x00CC0020
 TRANSPARENT = 1
@@ -258,6 +259,7 @@ class TaskbarStrip:
         self._mid_w = 0
         self._sep_w = 0
         self._sep_gap = 0
+        self._rgap = 0
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
         self._thread.start()
@@ -409,7 +411,9 @@ class TaskbarStrip:
         show_mem = bool(self.cfg.get("bar_show_mem", True))
         self._mid_w = mid_w if show_mem else 0
         self._sep_w = max(2, int(self._h * 0.03)) if show_mem else 0
-        self._sep_gap = max(7, int(self._h * 0.14))
+        self._sep_gap = max(4, int(self._h * 0.07))
+        # 有中列时，竖线已经起到分隔作用，右列不用再留一大段
+        self._rgap = self._sep_gap + 5 if show_mem else self.gap
         w = self.pad * 2 + net_w
         if show_mem:
             w += self._sep_gap * 4 + self._sep_w * 2 + self._mid_w
@@ -427,7 +431,7 @@ class TaskbarStrip:
         elif show_tok:
             right_w = tok_w
         if right_w:
-            w += self.gap + right_w
+            w += self._rgap + right_w
         self._w = int(w)
         self._net_w = net_w
         _log("measure", "h", self._h, "w", self._w, "font", self._font_px, "stack", self.stack)
@@ -572,22 +576,22 @@ class TaskbarStrip:
                         box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
                                             x + self._mid_w, h // 2 - dy + i * dy * 2 + dy // 2)
                         user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+                                        DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX)
                     x = self._draw_sep(mem, x + self._mid_w, h)
                 if len(right) >= 2:
-                    # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），右边缘对齐
+                    # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），紧贴竖线左对齐
                     for i, (text, color) in enumerate(right[:2]):
                         cy = h // 2 - dy + i * dy * 2
                         gdi32.SetTextColor(mem, cref(color))
-                        box = wintypes.RECT(x, cy - dy // 2, w - self.pad, cy + dy // 2)
+                        box = wintypes.RECT(x + self._rgap, cy - dy // 2, w - self.pad, cy + dy // 2)
                         user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                        DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
+                                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
                 elif right:
                     text, color = right[0]
                     gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x, 0, w - self.pad, h)
+                    box = wintypes.RECT(x + self._rgap, 0, w - self.pad, h)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
+                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
             else:
                 seq = list(left)
                 if mid:
