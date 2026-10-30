@@ -449,7 +449,7 @@ class Panel:
 # ---------------------------------------------------------------- 设置窗口
 
 class SettingsWindow(tk.Toplevel):
-    W = 380
+    W = 508
 
     def __init__(self, app):
         super().__init__(app.root)
@@ -503,9 +503,10 @@ class SettingsWindow(tk.Toplevel):
 
         row = tk.Frame(outer, bg=BG)
         row.pack(fill="x", pady=(10, 0))
-        self.pill(row, "从 magpie 读取", self.load_from_magpie)
-        self.pill(row, "清空", self.new_account)
-        self.pill(row, "测试连接", self.test)
+        self.pill(row, "读 magpie", self.load_from_magpie).pack(side="left")
+        self.pill(row, "读 CC Switch", self.load_from_ccswitch).pack(side="left", padx=(6, 0))
+        self.pill(row, "清空", self.new_account).pack(side="left", padx=(6, 0))
+        self.pill(row, "测试连接", self.test).pack(side="right")
 
         qrow = tk.Frame(outer, bg=BG)
         qrow.pack(fill="x", pady=(8, 0))
@@ -553,7 +554,8 @@ class SettingsWindow(tk.Toplevel):
     def reload_list(self):
         self.lb_list.delete(0, "end")
         for acc in self.accounts:
-            self.lb_list.insert("end", f"  {acc['name']}    {mask_key(acc['key'])}")
+            nm = acc["name"] if len(acc["name"]) <= 20 else acc["name"][:19] + "…"
+            self.lb_list.insert("end", f"  {nm}    {mask_key(acc['key'])}")
         if not self.accounts:
             self.lb_list.insert("end", "  （还没有账号，右边填一个）")
 
@@ -592,6 +594,62 @@ class SettingsWindow(tk.Toplevel):
         self.e_key.delete(0, "end")
         self.e_key.insert(0, key)
         self.msg("已从 magpie 读取", GREEN)
+
+    def load_from_ccswitch(self):
+        """把 CC Switch 里所有带地址和 Key 的供应商导入账号列表。"""
+        try:
+            items = core.ccswitch_providers()
+        except Exception as exc:
+            self.msg(str(exc)[:24], RED)
+            return
+        if not items:
+            self.msg("CC Switch 里没有可用的配置", RED)
+            return
+
+        added, pick = 0, None
+        for it in items:
+            base, key = it["base"], it["key"]
+            same = next((a for a in self.accounts
+                         if core.norm_base(a.get("base")) == base), None)
+            if same:                             # 同一地址已导入，只同步 Key
+                same["key"] = key
+                pick = pick or same["name"]
+                continue
+            name = it["name"] or "cc-switch"
+            if any(a.get("name") == name for a in self.accounts):
+                name = f"{name} ({core.url_host(base)})"
+            n = 2
+            while any(a.get("name") == name for a in self.accounts):
+                name = f"{it['name']} ({core.url_host(base)} {n})"
+                n += 1
+            self.accounts.append({"name": name, "base": base, "key": key})
+            added += 1
+            if it["current"] and pick is None:
+                pick = name
+        pick = pick or self.accounts[-1]["name"]
+
+        self.reload_list()
+        self.lb_list.config(height=max(1, min(4, len(self.accounts))))
+        hit = next((a for a in self.accounts if a["name"] == pick), None)
+        if hit:
+            self.show_account(hit)
+            idx = self.accounts.index(hit)
+            self.lb_list.selection_clear(0, "end")
+            self.lb_list.selection_set(idx)
+        self.fit_height()
+        if added:
+            self.msg(f"已导入 {added} 组，点保存生效", GREEN)
+        else:
+            self.msg("都在列表里了，Key 已同步", GREEN)
+
+    def fit_height(self):
+        """列表行数变了要跟着改窗高。"""
+        try:
+            self.update_idletasks()
+            self.geometry(f"{self.W}x{self.winfo_reqheight()}"
+                          f"+{self.winfo_x()}+{self.winfo_y()}")
+        except Exception:
+            pass
 
     def test(self):
         base = core.norm_base(self.e_base.get())

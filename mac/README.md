@@ -51,7 +51,9 @@ bash start.sh        # 自动检查依赖并启动
 
 - **名称 / 地址 / Key**：中转站地址填到域名即可（`https://api.example.com`，带不带 `/v1` 都行）
 - **每周额度**：默认 100，本周已用 = 周额度 − 总池剩余
-- 不想自己填，且本机装了 magpie：设置里点「从 magpie 读取」
+- 不想自己填：设置里点「读 magpie」或「读 CC Switch」，从本机已有配置导入
+  - magpie：`~/.config/magpie/providers.json`
+  - CC Switch：`~/.cc-switch/cc-switch.db` 的 providers 表，会把所有带地址和 Key 的供应商一次导入
 
 Key 只存在本机，不会上传。
 

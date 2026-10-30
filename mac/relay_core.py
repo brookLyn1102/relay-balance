@@ -7,6 +7,8 @@
 import datetime
 import json
 import os
+import re
+import sqlite3
 import time
 import urllib.request
 
@@ -19,6 +21,7 @@ APP_NAME = "中转管家"
 CONFIG_DIR = os.path.expanduser("~/.config/relay-balance")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 PROVIDERS_PATH = os.path.expanduser("~/.config/magpie/providers.json")
+CCSWITCH_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
 
 DEFAULT_CONFIG = {
     "provider": None,        # magpie 里的供应商 id；留空则自动取第一个可用供应商
@@ -78,6 +81,96 @@ def norm_base(base):
     if base.endswith("/v1"):
         base = base[:-3]
     return base
+
+
+# ------------------------------------------------- CC Switch 配置读取
+
+def url_host(base):
+    """https://a.com/v1 → a.com，用于区分同名供应商。"""
+    body = (base or "").split("//")[-1]
+    return body.split("/")[0] or base
+
+
+def looks_like_key(text):
+    """sk-xxx 或 bigmodel 那种长串，排除模型名和地址。"""
+    if not isinstance(text, str) or not 20 <= len(text) <= 200:
+        return False
+    if text.startswith("http") or " " in text or "/" in text:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._\-]+", text))
+
+
+def scan_pair(node, base=None, key=None):
+    """通用兜底：在任意层级里找 http 地址和像 Key 的字符串。"""
+    if isinstance(node, dict):
+        for v in node.values():
+            base, key = scan_pair(v, base, key)
+    elif isinstance(node, list):
+        for v in node:
+            base, key = scan_pair(v, base, key)
+    elif isinstance(node, str):
+        if base is None and node.startswith("http"):
+            base = node.strip().rstrip("/")
+        elif key is None and looks_like_key(node):
+            key = node
+    return base, key
+
+
+def extract_pair(app_type, conf):
+    """从一条 CC Switch 供应商配置里取出 (base, key)。各家结构不一样。"""
+    if not isinstance(conf, dict):
+        return None, None
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    auth = conf.get("auth") if isinstance(conf.get("auth"), dict) else {}
+    opts = conf.get("options") if isinstance(conf.get("options"), dict) else {}
+
+    base = (env.get("ANTHROPIC_BASE_URL") or env.get("OPENAI_BASE_URL")
+            or env.get("GEMINI_BASE_URL") or env.get("GOOGLE_GEMINI_BASE_URL")
+            or opts.get("baseURL") or opts.get("baseUrl") or auth.get("base_url"))
+    key = (env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")
+           or env.get("OPENAI_API_KEY") or env.get("GEMINI_API_KEY")
+           or env.get("GOOGLE_API_KEY") or opts.get("apiKey")
+           or auth.get("OPENAI_API_KEY"))
+    if not base or not key:
+        # codex 的地址写在 TOML 文本里：base_url = "https://..."
+        text = conf.get("config")
+        if isinstance(text, str):
+            m = re.search(r'base_url\s*=\s*["\']([^"\']+)["\']', text)
+            if m and not base:
+                base = m.group(1)
+    if not base or not key:
+        b2, k2 = scan_pair(conf)
+        base = base or b2
+        key = key or k2
+    if base and key:
+        return norm_base(base), key
+    return None, None
+
+
+def ccswitch_providers():
+    """读 CC Switch 本地库，列出所有同时带地址和 Key 的供应商。只读，不改库。"""
+    if not os.path.exists(CCSWITCH_DB):
+        raise RuntimeError("没找到 CC Switch 数据库")
+    con = sqlite3.connect("file:%s?mode=ro" % CCSWITCH_DB.replace("\\", "/"), uri=True)
+    try:
+        rows = con.execute(
+            "select app_type, name, settings_config, is_current from providers "
+            "order by is_current desc, app_type, sort_index").fetchall()
+    finally:
+        con.close()
+    out, seen = [], set()
+    for app, name, raw, cur in rows:
+        try:
+            conf = json.loads(raw or "{}")
+        except Exception:
+            continue
+        base, key = extract_pair(app, conf)
+        if not base or not key or (base, key) in seen:
+            continue
+        seen.add((base, key))
+        out.append({"app": app or "", "name": name or "", "base": base,
+                    "key": key, "current": bool(cur)})
+    return out
 
 
 def active_account(cfg):

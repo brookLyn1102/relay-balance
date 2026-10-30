@@ -12,6 +12,8 @@ import datetime
 import json
 import os
 import queue
+import re
+import sqlite3
 import sys
 import threading
 import time
@@ -41,6 +43,7 @@ APP_NAME = "中转管家"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 PROVIDERS_PATH = os.path.expanduser("~/.config/magpie/providers.json")
+CCSWITCH_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
 
 DEFAULT_CONFIG = {
     "provider": None,        # 留空则自动取 magpie 里第一个可用供应商
@@ -177,6 +180,97 @@ def norm_base(base):
     if base.endswith("/v1"):
         base = base[:-3]
     return base
+
+
+# ------------------------------------------------- CC Switch 配置读取
+
+def url_host(base):
+    """https://a.com/v1 → a.com，用于菜单里区分同名供应商。"""
+    body = (base or "").split("//")[-1]
+    return body.split("/")[0] or base
+
+
+def looks_like_key(text):
+    """sk-xxx 或 bigmodel 那种 32 位十六进制 + 点号后缀，排除模型名 / 地址。"""
+    if not isinstance(text, str) or not 20 <= len(text) <= 200:
+        return False
+    if text.startswith("http") or " " in text or "/" in text:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._\-]+", text))
+
+
+def scan_pair(node, base=None, key=None):
+    """通用兜底：在任意层级里找 http 地址和像 Key 的字符串。"""
+    if isinstance(node, dict):
+        for v in node.values():
+            base, key = scan_pair(v, base, key)
+    elif isinstance(node, list):
+        for v in node:
+            base, key = scan_pair(v, base, key)
+    elif isinstance(node, str):
+        if base is None and node.startswith("http"):
+            base = node.strip().rstrip("/")
+        elif key is None and looks_like_key(node):
+            key = node
+    return base, key
+
+
+def extract_pair(app_type, conf):
+    """从一条 CC Switch 供应商配置里取出 (base, key)。各家结构不一样。"""
+    if not isinstance(conf, dict):
+        return None, None
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    auth = conf.get("auth") if isinstance(conf.get("auth"), dict) else {}
+    opts = conf.get("options") if isinstance(conf.get("options"), dict) else {}
+
+    base = (env.get("ANTHROPIC_BASE_URL") or env.get("OPENAI_BASE_URL")
+            or env.get("GEMINI_BASE_URL") or env.get("GOOGLE_GEMINI_BASE_URL")
+            or opts.get("baseURL") or opts.get("baseUrl") or auth.get("base_url"))
+    key = (env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")
+           or env.get("OPENAI_API_KEY") or env.get("GEMINI_API_KEY")
+           or env.get("GOOGLE_API_KEY") or opts.get("apiKey")
+           or auth.get("OPENAI_API_KEY"))
+    if not base or not key:
+        # codex 的地址写在 TOML 文本里：base_url = "https://..."
+        text = conf.get("config")
+        if isinstance(text, str):
+            m = re.search(r'base_url\s*=\s*["\']([^"\']+)["\']', text)
+            if m and not base:
+                base = m.group(1)
+    if not base or not key:
+        b2, k2 = scan_pair(conf)
+        base = base or b2
+        key = key or k2
+    if base and key:
+        return norm_base(base), key
+    return None, None
+
+
+def ccswitch_providers():
+    """读 CC Switch 本地库，列出所有同时带地址和 Key 的供应商。只读，不改库。"""
+    if not os.path.exists(CCSWITCH_DB):
+        raise RuntimeError("没找到 CC Switch 数据库")
+    con = sqlite3.connect("file:%s?mode=ro" % CCSWITCH_DB.replace("\\", "/"), uri=True)
+    try:
+        rows = con.execute(
+            "select app_type, name, settings_config, is_current from providers "
+            "order by is_current desc, app_type, sort_index").fetchall()
+    finally:
+        con.close()
+    out, seen = [], set()
+    for app, name, raw, cur in rows:
+        try:
+            conf = json.loads(raw or "{}")
+        except Exception:
+            continue
+        base, key = extract_pair(app, conf)
+        if not base or not key or (base, key) in seen:
+            continue
+        seen.add((base, key))
+        out.append({"app": app or "", "name": name or "", "base": base,
+                    "key": key, "current": bool(cur)})
+    return out
+
 
 
 def active_account(cfg):
@@ -1411,7 +1505,7 @@ class TrafficStrip(tk.Toplevel):
 class SettingsWindow(tk.Toplevel):
     """换 Key：管理多组「名称 / 地址 / Key」，选中即切换。"""
 
-    W = 404
+    W = 462
 
     def __init__(self, app):
         super().__init__(app.root)
@@ -1479,7 +1573,8 @@ class SettingsWindow(tk.Toplevel):
 
         row1 = tk.Frame(outer, bg=BG)
         row1.pack(fill="x", padx=14, pady=(10, 0))
-        self.pill(row1, "从 magpie 读取", self.load_from_magpie).pack(side="left")
+        self.pill(row1, "读 magpie", self.load_from_magpie).pack(side="left")
+        self.pill(row1, "读 CC Switch", self.load_from_ccswitch).pack(side="left", padx=(6, 0))
         self.pill(row1, "清空", self.new_account).pack(side="left", padx=(6, 0))
         self.pill(row1, "测试连接", self.test).pack(side="right")
 
@@ -1606,13 +1701,15 @@ class SettingsWindow(tk.Toplevel):
         act = self.cfg.get("active")
         self.lst.delete(0, "end")
         if not self.accounts:
-            self.lst.insert("end", "  还没有账号 · 点「从 magpie 读取」")
+            self.lst.insert("end", "  还没有账号 · 点下方「读 magpie / 读 CC Switch」")
             self.lst.itemconfig(0, fg=MUTED)
             self.lst.config(height=1)
+            self.fit_height()
             return
         for acc in self.accounts:
             mark = "●" if acc["name"] == act else "○"
-            self.lst.insert("end", f"  {mark}  {acc['name']}      {mask_key(acc['key'])}")
+            nm = acc["name"] if len(acc["name"]) <= 20 else acc["name"][:19] + "…"
+            self.lst.insert("end", f"  {mark}  {nm}      {mask_key(acc['key'])}")
         self.lst.config(height=max(1, min(4, len(self.accounts))))
         idx = next((i for i, a in enumerate(self.accounts) if a["name"] == select), None)
         if idx is not None:
@@ -1620,6 +1717,17 @@ class SettingsWindow(tk.Toplevel):
             self.lst.selection_set(idx)
             self.lst.see(idx)
             self.fill_form(self.accounts[idx])
+        self.fit_height()
+
+    def fit_height(self):
+        """列表行数变了要跟着改窗高，否则底部提示会被切掉。"""
+        try:
+            self.update_idletasks()
+            h = self.winfo_reqheight()
+            self.geometry(f"{self.W}x{h}+{self.winfo_x()}+{self.winfo_y()}")
+            round_window(self)
+        except Exception:
+            pass
 
     def on_pick(self, event=None):
         sel = self.lst.curselection()
@@ -1652,6 +1760,43 @@ class SettingsWindow(tk.Toplevel):
         self.set_entry(self.e_base, base)
         self.set_entry(self.e_key, key)
         self.msg("已填入 magpie 的当前配置，保存后即独立")
+
+    def load_from_ccswitch(self):
+        """把 CC Switch 里所有带地址和 Key 的供应商导入账号列表。"""
+        try:
+            items = ccswitch_providers()
+        except Exception as exc:
+            self.msg(f"读取失败：{exc}", RED)
+            return
+        if not items:
+            self.msg("CC Switch 里没有带地址和 Key 的供应商", RED)
+            return
+
+        added, pick = 0, None
+        for it in items:
+            base, key = it["base"], it["key"]
+            same = next((a for a in self.accounts if norm_base(a.get("base")) == base), None)
+            if same:                             # 同一个地址已导入过，只同步 Key
+                same["key"] = key
+                pick = pick or same["name"]
+                continue
+            name = it["name"] or "cc-switch"
+            if any(a.get("name") == name for a in self.accounts):
+                name = f"{name} ({url_host(base)})"      # 重名补域名区分
+            n = 2
+            while any(a.get("name") == name for a in self.accounts):
+                name = f"{it['name']} ({url_host(base)} {n})"
+                n += 1
+            self.accounts.append({"name": name, "base": base, "key": key})
+            added += 1
+            if it["current"] and pick is None:
+                pick = name
+        pick = pick or self.accounts[-1]["name"]
+        self.reload_list(select=pick)
+        if added:
+            self.msg(f"已从 CC Switch 导入 {added} 组，选好点「保存并使用」", GREEN)
+        else:
+            self.msg("CC Switch 的配置都已在列表里，Key 已同步")
 
     def test(self):
         base = norm_base(self.e_base.get())
