@@ -64,6 +64,7 @@ class Panel:
         self.settings = None
         self.usage = None
         self._drag = None
+        self._show_requested = False
 
         self.root = tk.Tk()
         self.root.title("")
@@ -90,6 +91,8 @@ class Panel:
         self.root.after(300, self.tick_usage)
         self.root.after(120, self.poll)
 
+        signal.signal(signal.SIGUSR1, self.request_show)
+        self.root.after(200, self.bring_to_front)
         signal.signal(signal.SIGTERM, lambda *a: self.root.after(0, self.quit))
         signal.signal(signal.SIGINT, lambda *a: self.root.after(0, self.quit))
 
@@ -308,7 +311,23 @@ class Panel:
 
     # ------------------------------------------------------------ 网速
 
+    def request_show(self, *_args):
+        self._show_requested = True
+
+    def bring_to_front(self):
+        self.root.deiconify()
+        self.root.update_idletasks()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x = max(0, min(self.root.winfo_x(), sw - self.W))
+        y = max(40, min(self.root.winfo_y(), sh - self.root.winfo_height()))
+        self.root.geometry(f"+{x}+{y}")
+        self.root.lift()
+        self.root.focus_force()
+
     def tick(self):
+        if self._show_requested:
+            self._show_requested = False
+            self.bring_to_front()
         self.net.sample()
         if self.cfg.get("net_panel", True):
             self.lb_up.config(text="↑ " + core.fmt_speed(self.net.up))

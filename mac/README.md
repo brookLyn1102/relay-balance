@@ -23,7 +23,7 @@ python3 relay_menubar.py
 bash start.sh        # 自动检查依赖并启动
 ```
 
-启动后菜单栏右侧会出现 `↑0B ↓0B $—`，点它就有菜单：
+手动启动后会自动显示置顶面板，菜单栏右侧会出现 `↑0B ↓0B $—`，点它就有菜单：
 
 - 显示面板 / 隐藏面板
 - 立即刷新余额
@@ -31,6 +31,16 @@ bash start.sh        # 自动检查依赖并启动
 - 面板显示网速 / 菜单栏显示速度 / 菜单栏显示余额 / 菜单栏显示今日 token / 菜单栏显示剩余内存
 - 开机自启
 - 退出
+
+再次运行启动命令会显示 / 置前已有面板，不会重复启动菜单栏进程。
+如果只想启动菜单栏、不显示面板，可以运行：
+
+```bash
+python3 relay_menubar.py --background
+```
+
+菜单中的「开机自启」使用后台模式；手动打开时仍会显示面板。
+面板启动错误会输出到终端，不再被静默丢弃。
 
 ## token 用量
 
@@ -79,4 +89,14 @@ panel 和 menubar 是两个进程，各查各的（每 10 分钟才一次请求�
 
 - 网速排除 `lo0 / utun / awdl / llw / gif / stf / bridge / ap`，避免本机代理把同一份流量算两遍；en0 / en1 等真实网卡才计数
 - 余额接口同 Windows 版：`/v1/dashboard/billing/subscription` + `/v1/dashboard/billing/usage`（`total_usage` 单位是美分）
-- 这个端口是在 Windows 上写的，**还没在真 Mac 上跑过**。首次运行如果报错，把报错贴给我，按平台差异修（多半是字体名、`overrideredirect` 或 rumps 的菜单 API 细节）
+- 已在 Apple 芯片、macOS 26.0.1 上验证菜单初始化、面板创建和重新打开；余额查询仍需配置有效账号，其他系统版本尚未覆盖。
+
+## 回归测试
+
+在 macOS 上安装上述依赖后，从仓库根目录运行：
+
+```bash
+python3 -m unittest discover -s mac/tests -v
+```
+
+测试覆盖菜单勾选、刷新子菜单、显示 / 恢复面板、Finder 重开事件、单实例锁与后台启动；不读取账号或调用余额接口。

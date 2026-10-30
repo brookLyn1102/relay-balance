@@ -7,7 +7,10 @@
 面板是另一个进程（relay_panel.py），这里负责开关它。
 """
 
+import argparse
+import fcntl
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -26,6 +29,13 @@ LABEL = "com.relaybalance.menubar"
 PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
 
 
+def checked_item(title, callback, state):
+    """rumps 0.4 takes state as a property, not a constructor argument."""
+    item = rumps.MenuItem(title, callback=callback)
+    item.state = bool(state)
+    return item
+
+
 class MenuBarApp(rumps.App):
     def __init__(self):
         super().__init__(core.APP_NAME, title=core.APP_NAME, quit_button=None)
@@ -35,6 +45,7 @@ class MenuBarApp(rumps.App):
         self.error = None
         self.busy = False
         self.panel = None
+        self._show_requested = True
         self.last_at = 0.0
         self.mem_gb, self.mem_pct = core.mem_status()   # 先取一次，别让标题闪「—」
 
@@ -45,24 +56,24 @@ class MenuBarApp(rumps.App):
             None,
             rumps.MenuItem("立即刷新余额", callback=self.force_refresh),
             self.interval_item,
-            rumps.MenuItem(
+            checked_item(
                 f"夜间暂停 {core.fmt_hm(self.cfg['night_from'])}–"
                 f"{core.fmt_hm(self.cfg['night_to'])}",
                 callback=self.toggle_night,
                 state=self.cfg.get("night_pause", True)),
             None,
-            rumps.MenuItem("面板显示网速", callback=self.toggle_net,
+            checked_item("面板显示网速", callback=self.toggle_net,
                            state=self.cfg.get("net_panel", True)),
-            rumps.MenuItem("菜单栏显示速度", callback=self.toggle_speed,
+            checked_item("菜单栏显示速度", callback=self.toggle_speed,
                            state=self.cfg.get("menu_speed", True)),
-            rumps.MenuItem("菜单栏显示余额", callback=self.toggle_balance,
+            checked_item("菜单栏显示余额", callback=self.toggle_balance,
                            state=self.cfg.get("menu_balance", True)),
-            rumps.MenuItem("菜单栏显示今日 token", callback=self.toggle_token,
+            checked_item("菜单栏显示今日 token", callback=self.toggle_token,
                            state=self.cfg.get("menu_token", True)),
-            rumps.MenuItem("菜单栏显示剩余内存", callback=self.toggle_mem,
+            checked_item("菜单栏显示剩余内存", callback=self.toggle_mem,
                            state=self.cfg.get("menu_mem", True)),
             None,
-            rumps.MenuItem("开机自启", callback=self.toggle_autostart,
+            checked_item("开机自启", callback=self.toggle_autostart,
                            state=self.autostart_on()),
             rumps.MenuItem("退出", callback=self.quit),
         ]
@@ -82,7 +93,9 @@ class MenuBarApp(rumps.App):
             item.state = self.cfg["interval"] == sec
             items.append(item)
             self.interval_items[label] = item
-        return rumps.MenuItem("刷新间隔", items)
+        submenu = rumps.MenuItem("刷新间隔")
+        submenu.update(items)
+        return submenu
 
     def make_set_interval(self, sec):
         label = next(l for s, l in core.INTERVALS if s == sec)
@@ -140,6 +153,16 @@ class MenuBarApp(rumps.App):
 
     # ------------------------------------------------------------ 面板进程
 
+    def request_show(self, *_args):
+        # Signal and Cocoa handlers only enqueue work; the timer owns the UI.
+        self._show_requested = True
+
+    def show_panel(self):
+        if self.panel is not None and self.panel.poll() is None:
+            self.panel.send_signal(signal.SIGUSR1)
+        else:
+            self.toggle_panel()
+
     def toggle_panel(self, _sender=None):
         if self.panel is not None and self.panel.poll() is None:
             self.stop_panel()
@@ -148,8 +171,7 @@ class MenuBarApp(rumps.App):
             rumps.alert("找不到 relay_panel.py", PANEL)
             return
         self.panel = subprocess.Popen([sys.executable, PANEL], cwd=HERE,
-                                      stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL)
+                                      stdout=None, stderr=None)
         self.mi_panel.title = "隐藏面板"
 
     def stop_panel(self):
@@ -181,6 +203,9 @@ class MenuBarApp(rumps.App):
         self.last_at = time.time()
 
     def on_second(self, _sender):
+        if self._show_requested:
+            self._show_requested = False
+            self.show_panel()
         self.net.sample()
         if self.cfg.get("menu_mem", True):
             self.mem_gb, self.mem_pct = core.mem_status()
@@ -244,6 +269,7 @@ class MenuBarApp(rumps.App):
   <array>
     <string>{python}</string>
     <string>{os.path.join(HERE, "relay_menubar.py")}</string>
+    <string>--background</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
@@ -256,5 +282,67 @@ class MenuBarApp(rumps.App):
         sender.state = True
 
 
+def acquire_instance(path):
+    """Keep the lock open for the app lifetime; another launch reveals its panel."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    lock = os.fdopen(fd, "r+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            pid = int(lock.read().strip())
+            if pid > 1:
+                os.kill(pid, signal.SIGUSR1)
+        except (ValueError, ProcessLookupError):
+            pass
+        finally:
+            lock.close()
+        return None
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return lock
+
+
+def install_reopen_handler(app):
+    """Finder may deliver a reopen event instead of launching a second process."""
+    import objc
+    from rumps.rumps import NSApp
+
+    def reopen(_delegate, _sender, _visible):
+        app.request_show()
+        return False
+
+    callback = objc.selector(
+        reopen,
+        selector=b"applicationShouldHandleReopen:hasVisibleWindows:",
+        signature=objc._C_NSBOOL + b"@:@" + objc._C_NSBOOL,
+    )
+    objc.classAddMethods(NSApp, [callback])
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=core.APP_NAME)
+    parser.add_argument("--background", action="store_true",
+                        help="只启动菜单栏，不自动显示面板（用于开机自启）")
+    args = parser.parse_args(argv)
+    # Install before publishing our PID, so a concurrent launch cannot terminate us.
+    pending_show = [False]
+    signal.signal(signal.SIGUSR1, lambda *_: pending_show.__setitem__(0, True))
+    lock = acquire_instance(os.path.join(core.CONFIG_DIR, "menubar.lock"))
+    if lock is None:
+        return
+    try:
+        app = MenuBarApp()
+        app._show_requested = not args.background or pending_show[0]
+        signal.signal(signal.SIGUSR1, app.request_show)
+        install_reopen_handler(app)
+        app.run()
+    finally:
+        lock.close()
+
+
 if __name__ == "__main__":
-    MenuBarApp().run()
+    main()
