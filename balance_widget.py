@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "week_key": None,          # 当前所属的周，如 2026-W44（仅用于显示）
     # 网速
     "net_panel": True,          # 主面板里显示上传/下载
+    "panel_mem": True,          # 主面板里显示剩余内存
     "bar_mode": "taskbar",      # taskbar 贴任务栏 / float 悬浮条 / off 关闭
     "bar_dx": 0,                # 任务栏条水平微调
     "bar_dy": 0,                # 任务栏条垂直微调
@@ -393,6 +394,27 @@ def fmt_speed(v):
     return f"{v / 1024 ** 2:.2f} MB/s"
 
 
+def mem_status():
+    """(可用内存 GB, 已用百分比)。没装 psutil 时返回 (None, None)。"""
+    if psutil is None:
+        return None, None
+    try:
+        vm = psutil.virtual_memory()
+        return vm.available / 1024 ** 3, vm.percent
+    except Exception:
+        return None, None
+
+
+def fmt_mem(v):
+    if v is None:
+        return "—"
+    if v < 1:
+        return f"{v * 1024:.0f}M"
+    if v < 10:
+        return f"{v:.1f}G"
+    return f"{v:.0f}G"
+
+
 # ---------------------------------------------------------------- 窗口工具
 
 def round_window(win):
@@ -688,6 +710,11 @@ class Widget:
                                font=(self.f_zh, 8), anchor="w")
         self.lb_tok.pack(fill="x", padx=16, pady=(3, 0))
 
+        # 剩余内存（跟 token 一起 5 秒一刷）
+        self.lb_mem = tk.Label(outer, text="", bg=BG, fg=MUTED,
+                               font=(self.f_zh, 8), anchor="w")
+        self.lb_mem.pack(fill="x", padx=16, pady=(3, 0))
+
         # 实时网速：上传 / 下载
         self.net_row = tk.Frame(outer, bg=BG)
         self.lb_up = tk.Label(self.net_row, text="↑ —", bg=BG, fg=UP,
@@ -712,16 +739,19 @@ class Widget:
         self.build_menu()
 
         for w in (outer, body, head, foot, self.lb_left, self.net_row,
-                  self.lb_detail, self.lb_pool, self.lb_tok, self.lb_pct, self.lb_status):
+                  self.lb_detail, self.lb_pool, self.lb_tok, self.lb_mem,
+                  self.lb_pct, self.lb_status):
             w.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
         self.update_interval_label()
         self.apply_net_panel()
+        self.apply_mem_panel()
         try:
             self.today_tok = usage_stats.today_live()
         except Exception:
             self.today_tok = {}
         self.render_tok()
+        self.render_mem()
         self.root.after(1500, self.tick_usage)
 
     def build_menu(self):
@@ -769,6 +799,8 @@ class Widget:
                       command=lambda: self.set_cfg_bool("bar_dark"))
         m.add_command(label=("✓ " if self.cfg.get("net_panel", True) else "　") + "面板显示网速",
                       command=lambda: self.set_cfg_bool("net_panel"))
+        m.add_command(label=("✓ " if self.cfg.get("panel_mem", True) else "　") + "面板显示内存",
+                      command=lambda: self.set_cfg_bool("panel_mem"))
         return m
 
     def draw_bar(self):
@@ -799,6 +831,17 @@ class Widget:
             self.net_row.pack_forget()
         self.resize_height()
 
+    def apply_mem_panel(self):
+        on = bool(self.cfg.get("panel_mem", True)) and psutil is not None
+        mapped = bool(self.lb_mem.winfo_ismapped())
+        if on and not mapped:
+            # 插在网速行之前，否则重新 pack 会掉到最底下
+            anchor = self.net_row if self.net_row.winfo_ismapped() else self.foot
+            self.lb_mem.pack(fill="x", padx=16, pady=(3, 0), before=anchor)
+        elif not on and mapped:
+            self.lb_mem.pack_forget()
+        self.resize_height()
+
     def render_tok(self):
         t = getattr(self, "today_tok", None) or {}
         total = (t.get("in", 0) or 0) + (t.get("out", 0) or 0)
@@ -808,15 +851,28 @@ class Widget:
         else:
             self.lb_tok.config(text="今日 — tok")
 
+    def render_mem(self):
+        gb, pct = mem_status()
+        if gb is None:
+            self.lb_mem.config(text="内存 —")
+            return
+        color = MUTED
+        if pct >= 90:
+            color = RED
+        elif pct >= 80:
+            color = AMBER
+        self.lb_mem.config(text=f"内存 {fmt_mem(gb)} 可用 · 已用 {pct:.0f}%", fg=color)
+
     def tick_usage(self):
         try:
             self.today_tok = usage_stats.today_live()
         except Exception:
             self.today_tok = {}
-        try:
-            self.render_tok()
-        except Exception:
-            pass
+        for fn in (self.render_tok, self.render_mem):
+            try:
+                fn()
+            except Exception:
+                pass
         self.root.after(5000, self.tick_usage)
 
     def resize_height(self):
@@ -920,7 +976,9 @@ class Widget:
         save_config(self.cfg)
         if key == "net_panel":
             self.apply_net_panel()
-        if key.startswith("bar_") and self.strip is not None:
+        elif key == "panel_mem":
+            self.apply_mem_panel()
+        elif key.startswith("bar_") and self.strip is not None:
             try:
                 if hasattr(self.strip, "refresh_layout"):
                     self.strip.refresh_layout()
