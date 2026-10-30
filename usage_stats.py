@@ -338,6 +338,7 @@ def today_live():
 
 
 if __name__ == "__main__":
+    t0 = time.time()
     data = collect()
     print(f"读耗时 {time.time() - t0:.2f}s，{len(data)} 天有数据")
     td = totals(data, month_dates())

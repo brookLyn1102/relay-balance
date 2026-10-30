@@ -21,8 +21,9 @@
 | 额度面板 | 无边框卡片，可置顶、可拖动、位置自动记忆；大字显示总池剩余，进度条按周额度算占用 |
 | 任务栏条 | 透明底只留文字，贴在托盘左侧；上传/下载两行叠放；截图、任务栏重排后会自动抢回层级 |
 | 周额度 | 本周已用 = 周额度 − 总池剩余，公司按周给池子补额度，补满即自动归零 |
-| 托盘菜单 | 立即刷新、刷新间隔（30 秒 ~ 30 分钟）、网速条开关与微调、设置、退出 |
+| 托盘菜单 | 立即刷新、刷新间隔（30 秒 ~ 30 分钟）、网速条开关与微调、用量统计、设置、退出 |
 | 设置窗口 | 管理多组「名称 / 地址 / Key」，可测试连接、可从 magpie 配置一键读取 |
+| token 用量 | 面板与任务栏条显示今日消耗（每 5 秒刷新）；托盘「用量统计…」看今日 / 本周 / 本月、近 7 天、按月、模型拆分 |
 | 其他 | 单实例运行、开机自启、最小化到托盘、窗口位置持久化 |
 
 ## 运行
@@ -82,13 +83,15 @@ python make_shortcut.py
 
 ## 实现备忘
 
-Win11 的任务栏是 XAML 合成层，TrafficMonitor 那种把窗口 `SetParent` 挂进 `Shell_TrayWnd` 的做法会被完全遮住。这里的做法是：
+Win11 的任务栏是 XAML 合成层。最初把无边框 Tk 窗口贴在任务栏上，靠每秒扫 Z 序把被压下去的抢回来——鼠标悬停任务栏图标时任务栏会重排层级，条就会闪一下消失。现在的做法照 TrafficMonitor 来：
 
-1. 独立无边框 `Toplevel` + `-transparentcolor` 抠底，直接浮在任务栏对应位置
-2. `SetWindowPos(HWND_TOP)` 再 `HWND_TOPMOST`，因为 `SetWindowBand` 在 Win11 上已失效
-3. 每秒扫一次窗口 Z 序，被外部窗口压住就抢回来（截图工具关掉后自动恢复）
+1. `taskbar_strip.py` 用纯 Win32 `CreateWindowEx(WS_CHILD)` + `SetParent(Shell_TrayWnd)`，把自己变成任务栏的子窗口
+2. GDI 双缓冲自绘（`CreateCompatibleBitmap` + `BitBlt`），跑在独立消息线程里，不占 Tk 主循环
+3. `WS_EX_LAYERED` + 透明色 key 抠底，文字颜色跟任务栏明暗（`SystemUsesLightTheme`）走
 
-另外两个坑：改 `WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` 后必须带 `SWP_FRAMECHANGED` 重排，否则分层窗口只显示底色不显示文字；`ImageTk.PhotoImage` 要复用并 `paste` 原位更新，每帧新建会掉字。
+子窗口不参与顶层 Z 序竞争，所以不需要任何「抢置顶」逻辑。同样的路子 Tk 走不通：`SetParent` 后父句柄会被 Tk 自己清回 0，补上 `WS_CHILD` 虽然能挂住，但会被 XAML 内容层盖住。
+
+token 用量只读本地日志（magpie 的 `~/.config/magpie/routing/*.jsonl` + CC Switch 的 sqlite），5 秒一轮必须做增量：按字节偏移只消费新增的行，整行没写完就留到下一轮。
 
 ## 许可
 

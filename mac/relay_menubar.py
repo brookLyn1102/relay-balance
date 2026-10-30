@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rumps
 
 import relay_core as core
+import usage_stats as usage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PANEL = os.path.join(HERE, "relay_panel.py")
@@ -50,6 +51,8 @@ class MenuBarApp(rumps.App):
                            state=self.cfg.get("menu_speed", True)),
             rumps.MenuItem("菜单栏显示余额", callback=self.toggle_balance,
                            state=self.cfg.get("menu_balance", True)),
+            rumps.MenuItem("菜单栏显示今日 token", callback=self.toggle_token,
+                           state=self.cfg.get("menu_token", True)),
             None,
             rumps.MenuItem("开机自启", callback=self.toggle_autostart,
                            state=self.autostart_on()),
@@ -97,6 +100,12 @@ class MenuBarApp(rumps.App):
     def toggle_balance(self, sender):
         self.cfg["menu_balance"] = not self.cfg.get("menu_balance", True)
         sender.state = self.cfg["menu_balance"]
+        core.save_config(self.cfg)
+        self.update_title()
+
+    def toggle_token(self, sender):
+        self.cfg["menu_token"] = not self.cfg.get("menu_token", True)
+        sender.state = self.cfg["menu_token"]
         core.save_config(self.cfg)
         self.update_title()
 
@@ -151,6 +160,12 @@ class MenuBarApp(rumps.App):
 
     def on_second(self, _sender):
         self.net.sample()
+        self._tok_tick = getattr(self, "_tok_tick", 0) + 1
+        if self._tok_tick % 5 == 1:              # 每 5 秒读一次日志增量
+            try:
+                self.today_tok = usage.today_live()
+            except Exception:
+                self.today_tok = {}
         if not self.busy and time.time() - getattr(self, "last_at", 0) >= self.cfg["interval"]:
             self.refresh()
         self.update_title()
@@ -167,6 +182,11 @@ class MenuBarApp(rumps.App):
                 parts.append("离线")
             else:
                 parts.append("$—")
+        if self.cfg.get("menu_token", True):
+            t = getattr(self, "today_tok", None) or {}
+            total = (t.get("in", 0) or 0) + (t.get("out", 0) or 0)
+            if total:
+                parts.append(f"{usage.fmt_tokens(total)} tok")
         self.title = "  ".join(parts) if parts else core.APP_NAME
 
     # ------------------------------------------------------------ 自启

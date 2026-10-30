@@ -33,6 +33,8 @@ DEFAULT_CONFIG = {
     "net_panel": True,       # 面板里显示上传 / 下载
     "menu_speed": True,      # 菜单栏标题里显示速度
     "menu_balance": True,    # 菜单栏标题里显示余额
+    "panel_token": True,     # 面板里显示今日 token
+    "menu_token": True,      # 菜单栏标题里显示今日 token
 }
 
 INTERVALS = [
