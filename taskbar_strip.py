@@ -239,11 +239,12 @@ class TaskbarStrip:
 
     _cls_registered = False
 
-    def __init__(self, app, fmt_speed_fn=None, fmt_money_fn=None):
+    def __init__(self, app, fmt_speed_fn=None, fmt_money_fn=None, mem_fn=None):
         self.app = app
         self.cfg = app.cfg
         self._fs = fmt_speed_fn or fmt_speed
         self._fm = fmt_money_fn or fmt_money
+        self._mem = mem_fn                       # 返回 (可用 GB, 已用 %)
         self.hwnd = None
         self.ready = threading.Event()
         self.failed = None
@@ -254,6 +255,7 @@ class TaskbarStrip:
         self._font_px = 0
         self._key = None
         self._texts = []
+        self._mid_w = 0
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
         self._thread.start()
@@ -392,6 +394,7 @@ class TaskbarStrip:
             dn_w = width("↓ 999.9 MB/s")
             bal_w = width("$9,999.99")
             tok_w = width("999.9M tok")
+            mid_w = width("100%")
         finally:
             user32.ReleaseDC(self.hwnd, hdc)
 
@@ -399,7 +402,10 @@ class TaskbarStrip:
         self.pad = max(8, int(self._h * 0.22))
         self.gap = max(10, int(self._h * 0.30))
         net_w = max(up_w, dn_w) if self.stack else up_w + self.gap + dn_w
+        self._mid_w = mid_w if self.cfg.get("bar_show_mem", True) else 0
         w = self.pad * 2 + net_w
+        if self._mid_w:
+            w += self.gap + self._mid_w
 
         show_bal = bool(self.cfg.get("bar_show_balance", True))
         show_tok = bool(self.cfg.get("bar_show_token", True))
@@ -478,6 +484,21 @@ class TaskbarStrip:
         dn = self._fs(self.app.net.down)
         left = [("↑ " + up, self.c_up), ("↓ " + dn, self.c_down)]
 
+        # 中间只放一个占用百分比，省宽度
+        mid = None
+        if self.cfg.get("bar_show_mem", True) and self._mem is not None:
+            try:
+                _gb, pct = self._mem()
+            except Exception:
+                pct = None
+            if pct is not None:
+                color = self.fg
+                if pct >= 90:
+                    color = "#dc2626"
+                elif pct >= 80:
+                    color = "#b45309" if self._light else "#fbbf24"
+                mid = (f"{pct:.0f}%", color)
+
         right = []
         if self.cfg.get("bar_show_balance", True):
             w = getattr(self.app, "week", None)
@@ -495,7 +516,7 @@ class TaskbarStrip:
             tok = self._tok_text()
             if tok:
                 right.append((tok, self.fg))
-        return left, right
+        return left, mid, right
 
     def _paint(self, hwnd):
         self._theme()
@@ -516,7 +537,7 @@ class TaskbarStrip:
 
             gdi32.SetBkMode(mem, TRANSPARENT)
             gdi32.SelectObject(mem, self._font)
-            left, right = self._segments()
+            left, mid, right = self._segments()
             x = self.pad
             if self.stack:
                 dy = max(6, int(h * 0.215))
@@ -527,6 +548,13 @@ class TaskbarStrip:
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
                 x += self._net_w + self.gap
+                if mid:
+                    text, color = mid
+                    gdi32.SetTextColor(mem, cref(color))
+                    box = wintypes.RECT(x, 0, x + self._mid_w + 4, h)
+                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+                    x += self._mid_w + self.gap
                 if len(right) >= 2:
                     # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），右边缘对齐
                     for i, (text, color) in enumerate(right[:2]):
@@ -542,7 +570,7 @@ class TaskbarStrip:
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                     DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX)
             else:
-                for text, color in left + right:
+                for text, color in left + ([mid] if mid else []) + right:
                     gdi32.SetTextColor(mem, cref(color))
                     box = wintypes.RECT(x, 0, w, h)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),

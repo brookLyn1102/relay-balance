@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
     "bar_dy": 0,                # 任务栏条垂直微调
     "bar_show_balance": True,   # 条上是否显示余额
     "bar_show_token": True,     # 条上是否显示今日 token
+    "bar_show_mem": True,       # 条上是否显示内存占用百分比
     "bar_dark": True,           # 实底时的配色：深色 / 浅色
     "bar_transparent": True,    # 抠掉底色，只留文字，贴合任务栏
     "bar_stack": True,          # 上传/下载两行叠放，窄一些
@@ -791,6 +792,8 @@ class Widget:
                       command=lambda: self.set_cfg_bool("bar_show_balance"))
         m.add_command(label=("✓ " if self.cfg.get("bar_show_token", True) else "　") + "条上显示今日 token",
                       command=lambda: self.set_cfg_bool("bar_show_token"))
+        m.add_command(label=("✓ " if self.cfg.get("bar_show_mem", True) else "　") + "条上显示内存占用",
+                      command=lambda: self.set_cfg_bool("bar_show_mem"))
         m.add_command(label=("✓ " if self.cfg.get("bar_transparent", True) else "　") + "透明底",
                       command=lambda: self.set_cfg_bool("bar_transparent"))
         m.add_command(label=("✓ " if self.cfg.get("bar_stack", True) else "　") + "两行叠放",
@@ -922,7 +925,7 @@ class Widget:
         悬浮条还是用 Tk 的置顶小窗。"""
         if mode == "taskbar" and TaskbarStrip is not None:
             try:
-                return TaskbarStrip(self, fmt_speed, fmt_money)
+                return TaskbarStrip(self, fmt_speed, fmt_money, mem_status)
             except Exception:
                 pass
         try:
