@@ -25,6 +25,7 @@ final class Model: ObservableObject {
     private var lastAt: Date?
     private var tickCount = 0
     private var tokMark: Int?
+    private var lastErrorAt: Date?
 
     /// 标题 / 菜单需要跟着刷新时回调
     var onChange: (() -> Void)?
@@ -34,6 +35,7 @@ final class Model: ObservableObject {
     }
 
     func start() {
+        Log.write("启动 中转管家", Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "dev")
         net.sample()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.onSecond()
@@ -110,6 +112,7 @@ final class Model: ObservableObject {
 
     private func apply(_ data: Balance) {
         busy = false
+        lastErrorAt = nil
         balance = data
         let w = weekSplit(cfg, pool: data.left)
         week = w
@@ -124,9 +127,17 @@ final class Model: ObservableObject {
     private func applyError(_ message: String) {
         busy = false
         lastAt = Date()
+        lastErrorAt = Date()
         statusText = shortError(message)
         statusKind = .bad
+        Log.write("[查询失败]", message)
         onChange?()
+        // 网络抖一下就等满整个间隔太亏，5 秒后补一次；期间成功了就不再补
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self = self, !self.busy, self.lastErrorAt != nil else { return }
+            Log.write("[重试] 上次查询失败，补一次")
+            self.refresh()
+        }
     }
 
     func clockText(_ date: Date) -> String {
@@ -137,11 +148,33 @@ final class Model: ObservableObject {
 
     func shortError(_ msg: String) -> String {
         let low = msg.lowercased()
-        if low.contains("timed out") || low.contains("超时") { return "超时，稍后再试" }
+        if low.contains("magpie") || low.contains("配置") ||
+            low.contains("no such file") || low.contains("没有供应商") {
+            return "读不到 magpie / CC Switch 配置"
+        }
+        if low.contains("429") || low.contains("too many") || low.contains("rate limit") {
+            return "请求太频繁，稍后再试"
+        }
         if low.contains("401") || low.contains("unauthorized") { return "密钥无效" }
+        if low.contains("403") || low.contains("forbidden") { return "密钥无权访问" }
         if low.contains("404") { return "中转没有计费接口" }
-        if low.contains("magpie") || low.contains("配置") { return "读不到 magpie 配置" }
-        if low.contains("offline") || low.contains("internet") { return "网络不通" }
+        for code in ["500", "502", "503", "504"] where low.contains(code) {
+            return "中转服务异常（\(code)）"
+        }
+        if low.contains("timed out") || low.contains("超时") { return "超时，稍后再试" }
+        if low.contains("certificate") || low.contains("ssl") || low.contains("tls") {
+            return "证书校验失败，检查系统时间或代理"
+        }
+        if low.contains("refused") || low.contains("积极拒绝") {
+            return "连不上中转，检查网络或代理"
+        }
+        if low.contains("hostname") || low.contains("dns") || low.contains("resolve") {
+            return "域名解析失败，检查 DNS"
+        }
+        if low.contains("offline") || low.contains("internet") ||
+            low.contains("unreachable") || low.contains("network") {
+            return "网络不通，连接被中断"
+        }
         return String(msg.prefix(28))
     }
 

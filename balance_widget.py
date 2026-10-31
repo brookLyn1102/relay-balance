@@ -38,6 +38,7 @@ try:
 except Exception:                                    # 新条不可用时回退 Tk 版
     TaskbarStrip = None
 
+import applog
 import usage_stats
 import updater
 
@@ -144,11 +145,20 @@ def in_night(cfg, now=None):
 
 
 def save_config(cfg):
+    """原子写：先落临时文件再 os.replace，写一半崩了也不会毁掉原配置。"""
+    tmp = CONFIG_PATH + ".tmp"
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        applog.log("save_config 失败:", e)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- 数据
@@ -679,6 +689,7 @@ class Widget:
         self.refresh()
         self.root.after(200, self.tick)
         self.root.after(900, self.tick_net)
+        self.root.after(3000, self.watch_strip)
         self.root.after(8000, self.auto_check)
 
     def round_corners(self):
@@ -825,6 +836,7 @@ class Widget:
         self.menu.add_command(label="设置 / 换 Key", command=self.open_settings)
         self.menu.add_command(label=f"检查更新（v{APP_VERSION}）",
                               command=lambda: self.check_update(manual=True))
+        self.menu.add_command(label="打开日志", command=self.open_log)
         self.menu.add_command(label="隐藏到托盘", command=self.hide)
         self.menu.add_command(label="退出", command=self.quit)
 
@@ -1003,12 +1015,30 @@ class Widget:
                     pass
         self.root.after(1000, self.tick_net)
 
+    def watch_strip(self):
+        """每 3 秒看一眼任务栏条还在不在。explorer 重启会把它带走。"""
+        try:
+            if (self.cfg.get("bar_mode") == "taskbar"
+                    and TaskbarStrip is not None
+                    and isinstance(self.strip, TaskbarStrip)
+                    and not self.strip.health()):
+                applog.log("任务栏条失联（explorer 可能重启过），重建")
+                self.strip = None
+                self.retry_taskbar_strip(0)
+        except Exception as e:
+            applog.log("watch_strip err", e)
+        self.root.after(3000, self.watch_strip)
+
     # ---------------- 网速条
+
+    # 挂任务栏失败后按这个节奏重试（秒），用完就认命用浮条
+    STRIP_RETRY = (5, 10, 20, 40, 60)
 
     def apply_bar_mode(self, mode):
         self.cfg["bar_mode"] = mode
         save_config(self.cfg)
         self.destroy_strip()
+        self._strip_try = 0
         if mode != "off" and psutil is not None:
             self.strip = self.make_strip(mode)
         self.build_menu()
@@ -1020,12 +1050,43 @@ class Widget:
         if mode == "taskbar" and TaskbarStrip is not None:
             try:
                 return TaskbarStrip(self, fmt_speed, fmt_money, mem_status)
-            except Exception:
-                pass
+            except Exception as e:
+                # 开机自启时可能比 explorer 早，任务栏还没建好——先浮条顶上，稍后重试
+                applog.log("任务栏条挂载失败:", e)
+                self._strip_try = 0
+                self.schedule_strip_retry(0)
         try:
             return TrafficStrip(self, mode)
-        except Exception:
+        except Exception as e:
+            applog.log("浮条也建不起来:", e)
             return None
+
+    def schedule_strip_retry(self, attempt):
+        if attempt >= len(self.STRIP_RETRY):
+            applog.log("任务栏条重挂次数用尽，本次用浮条")
+            return
+        delay = self.STRIP_RETRY[attempt] * 1000
+        applog.log("任务栏条 %ds 后第 %d 次重挂" % (delay // 1000, attempt + 1))
+        self.root.after(delay, lambda: self.retry_taskbar_strip(attempt))
+
+    def retry_taskbar_strip(self, attempt):
+        if self.cfg.get("bar_mode") != "taskbar" or TaskbarStrip is None:
+            return
+        if isinstance(self.strip, TaskbarStrip) and self.strip.health():
+            self._strip_try = 0
+            return
+        try:
+            strip = TaskbarStrip(self, fmt_speed, fmt_money, mem_status)
+        except Exception as e:
+            applog.log("重挂仍失败:", e)
+            self._strip_try = attempt + 1
+            self.schedule_strip_retry(attempt + 1)
+            return
+        applog.log("任务栏条重挂成功")
+        self._strip_try = 0
+        self.destroy_strip()
+        self.strip = strip
+        self.flash_status("任务栏条已挂上", GREEN, hold=2000)
 
     def destroy_strip(self):
         if self.strip is not None:
@@ -1106,6 +1167,12 @@ class Widget:
             win.focus_force()
             return
         self.settings = SettingsWindow(self)
+
+    def open_log(self):
+        """把日志目录打开并选中文件，出问题时让用户自己就能看一眼。"""
+        path = applog.open_in_explorer()
+        applog.log("用户打开日志", path)
+        self.flash_status("日志：" + os.path.basename(path), MUTED, hold=2500)
 
     def open_usage(self):
         win = getattr(self, "usage", None)
@@ -1432,6 +1499,9 @@ class Widget:
             self.status_text = self.short_error(error)
             self.status_color = RED
             self.lb_status.config(text=self.status_text, fg=RED)
+            applog.log("查询失败:", error)
+            # 网络抖一下就等满整个间隔太亏，5 秒后补一次（只补一次）
+            self.root.after(5000, self.retry_after_error)
             if self.data is None:
                 self.lb_left.config(text="—")
                 self.lb_pct.config(text="")
@@ -1473,16 +1543,56 @@ class Widget:
 
     @staticmethod
     def short_error(msg):
-        low = msg.lower()
+        """把原始异常翻成一句人话。状态栏只有三十来字，宁可含糊也别露英文堆栈。"""
+        low = (msg or "").lower()
+
+        # 本地配置类，先判——这些跟网络无关
+        if "no such file" in low or "找不到" in msg or "没有供应商" in msg:
+            return "读不到 magpie / CC Switch 配置"
+        if "没有可用" in msg or "未配置" in msg or "密钥为空" in msg:
+            return "还没填密钥"
+
+        # HTTP 状态
+        if "429" in low or "too many requests" in low or "rate limit" in low:
+            return "请求太频繁，稍后再试"
+        if "401" in low or "unauthorized" in low or "invalid token" in low:
+            return "密钥无效"
+        if "403" in low or "forbidden" in low:
+            return "密钥无权访问"
+        if "404" in low:
+            return "中转没有计费接口"
+        for code in ("500", "502", "503", "504"):
+            if code in low:
+                return "中转服务异常（%s）" % code
+
+        # 传输层
         if "timed out" in low or "timeout" in low:
             return "超时，稍后再试"
-        if "401" in low or "unauthorized" in low:
-            return "密钥无效"
-        if "http 404" in low:
-            return "中转没有计费接口"
-        if "no such file" in low or "找不到" in low or "没有供应商" in msg:
-            return "读不到 magpie 配置"
-        return msg[:42]
+        if "certificate" in low or "ssl" in low or "tls" in low:
+            return "证书校验失败，检查系统时间或代理"
+        if "10061" in low or "refused" in low or "积极拒绝" in msg:
+            return "连不上中转，检查网络或代理"
+        if "11001" in low or "getaddrinfo" in low or "name or service" in low:
+            return "域名解析失败，检查 DNS"
+        if "10051" in low or "unreachable" in low or "10054" in low:
+            return "网络不通，连接被中断"
+        if "proxy" in low:
+            return "代理设置有问题"
+
+        # 兜底：去掉 urllib 的套话外壳，留最像原因的那段
+        text = re.sub(r"<urlopen error (.*)>", r"\1", msg or "")
+        text = re.sub(r"\[Errno -?\d+\]\s*", "", text)
+        text = re.sub(r"^\[WinError \d+\]\s*", "", text)
+        text = " ".join(text.split())
+        return text[:42] or "查询失败"
+
+    def retry_after_error(self):
+        """失败 5 秒后补一次。只补一次，避免断网时无限重试。"""
+        if self.busy or self.ok or in_night(self.cfg):
+            return
+        applog.log("上次查询失败，5 秒后重试一次")
+        self.flash_status("重试中…", MUTED, hold=1500)
+        self.refresh()
 
     def tick(self):
         delay = max(10, int(self.cfg["interval"])) * 1000
@@ -1570,6 +1680,7 @@ class Widget:
                 lambda item: self.root.after(0, self.toggle_token_refresh),
                 checked=lambda item: bool(self.cfg.get("refresh_on_token", True))),
             pystray.MenuItem("网速条", bar_menu()),
+            pystray.MenuItem("打开日志", lambda item: self.root.after(0, self.open_log)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("窗口置顶", toggle_top,
                              checked=lambda item: self.cfg["topmost"]),
@@ -2535,10 +2646,12 @@ def main():
     if not ok:
         print("已经在运行了")
         return 0
+    applog.log("启动", APP_NAME, APP_VERSION, "python", sys.version.split()[0],
+               "pid", os.getpid())
     try:
         Widget().run()
     finally:
-        pass
+        applog.log("退出")
     return 0
 
 

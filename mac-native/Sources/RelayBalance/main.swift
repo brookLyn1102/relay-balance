@@ -109,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         update.target = self
         menu.addItem(update)
 
+        let logItem = NSMenuItem(title: "打开日志", action: #selector(openLog), keyEquivalent: "")
+        logItem.target = self
+        menu.addItem(logItem)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q")
@@ -177,6 +181,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "可更新 · \(info.remote ?? "")"
         }
         return "检查更新（v\(Updater.version)）"
+    }
+
+    @objc private func openLog() {
+        Log.write("用户打开日志")
+        Log.reveal()
     }
 
     @objc private func checkUpdateAction() {

@@ -10,6 +10,8 @@ import threading
 import time
 from ctypes import wintypes
 
+import applog
+
 try:
     from usage_stats import fmt_tokens as _fmt_tok
 except Exception:                                     # 单独跑时也不能崩
@@ -170,6 +172,8 @@ user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 user32.InvalidateRect.argtypes = [wintypes.HWND, wintypes.LPVOID, wintypes.BOOL]
 user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
                                 wintypes.WPARAM, wintypes.LPARAM]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
@@ -203,9 +207,9 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "taskbar_str
 
 
 def _log(*a):
+    """统一进 applog（%LOCALAPPDATA%\\relay-balance\\app.log），不再单开一份。"""
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(time.strftime("%H:%M:%S ") + " ".join(str(x) for x in a) + "\n")
+        applog.log("[strip]", *a)
     except Exception:
         pass
 
@@ -682,6 +686,27 @@ class TaskbarStrip:
         if not self.hwnd or not self._alive:
             return
         user32.PostMessageW(self.hwnd, WM_APP_REDRAW, 0, 0)
+
+    def health(self):
+        """条还挂在任务栏上吗。
+
+        explorer 重启（或崩了自动重启）时 Shell_TrayWnd 会换句柄，旧的条跟着
+        旧任务栏一起销毁——线程退出、窗口消失，界面看着就是「条没了」。这里
+        给主程序一个判断依据，好重建。
+        """
+        if not self._alive or not self.hwnd:
+            return False
+        try:
+            if not user32.IsWindow(self.hwnd):
+                return False
+            if not self._thread.is_alive():
+                return False
+            tb = user32.FindWindowW("Shell_TrayWnd", None)
+            if not tb:
+                return False
+            return user32.GetParent(self.hwnd) == tb
+        except Exception:
+            return False
 
     def destroy(self):
         self._alive = False

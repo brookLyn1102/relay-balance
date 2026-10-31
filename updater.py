@@ -10,6 +10,14 @@ import subprocess
 import urllib.error
 import urllib.request
 
+try:
+    import applog
+except Exception:                                    # 单独跑脚本时也不能崩
+    class applog:                                    # noqa: N801
+        @staticmethod
+        def log(*a):
+            pass
+
 REPO = "brookLyn1102/relay-balance"
 BRANCH = "main"
 HOME_PAGE = f"https://github.com/{REPO}"
@@ -155,8 +163,11 @@ def check():
             info["date"] = data.get("commit", {}).get("author", {}).get("date", "")
             info["error"] = "本地不是 git 副本，无法判断是否最新"
         info["ok"] = True
+        applog.log("[更新] 本地", info.get("local"), "远端", info.get("remote"),
+                   "落后", info["behind"])
     except Exception as exc:                        # noqa: BLE001
         info["error"] = _friendly(exc)
+        applog.log("[更新] 查询失败:", info["error"])
     return info
 
 
