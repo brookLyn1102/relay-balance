@@ -85,6 +85,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         night.state = model.cfg.nightPause ? .on : .off
         menu.addItem(night)
 
+        let tokenOnly = NSMenuItem(title: "有用量才查余额",
+                                   action: #selector(toggleTokenRefresh), keyEquivalent: "")
+        tokenOnly.target = self
+        tokenOnly.state = model.cfg.refreshOnToken ? .on : .off
+        menu.addItem(tokenOnly)
+
         menu.addItem(.separator())
 
         let panel = NSMenuItem(title: "显示面板", action: #selector(openPanel), keyEquivalent: "")
@@ -157,6 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleNight() {
         model.toggleNight()
+    }
+
+    @objc private func toggleTokenRefresh() {
+        model.toggleTokenRefresh()
     }
 
     // MARK: 更新

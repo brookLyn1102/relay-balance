@@ -24,6 +24,7 @@ final class Model: ObservableObject {
     private var timer: Timer?
     private var lastAt: Date?
     private var tickCount = 0
+    private var tokMark: Int?
 
     /// 标题 / 菜单需要跟着刷新时回调
     var onChange: (() -> Void)?
@@ -61,7 +62,7 @@ final class Model: ObservableObject {
 
         tickCount += 1
         if tickCount % 5 == 1 {
-            if cfg.panelToken {
+            if cfg.panelToken || cfg.refreshOnToken {
                 todayTok = UsageReader.shared.todayLive()
             }
             if cfg.menuMem {
@@ -83,9 +84,7 @@ final class Model: ObservableObject {
             statusText = "已恢复刷新"
         }
 
-        if let last = lastAt, Date().timeIntervalSince(last) >= Double(cfg.interval), !busy {
-            refresh()
-        }
+        maybeRefresh()
         onChange?()
     }
 
@@ -116,6 +115,7 @@ final class Model: ObservableObject {
         week = w
         cfg.weekKey = weekKey()
         lastAt = Date()
+        tokMark = todayTok?.total ?? UsageReader.shared.todayLive().total
         statusText = clockText(data.at)
         statusKind = w.pct >= 95 ? .bad : (w.pct >= 80 ? .warn : .good)
         onChange?()
@@ -215,6 +215,26 @@ final class Model: ObservableObject {
         cfg.interval = seconds
         save()
         if !nightIdle { refresh() }
+    }
+
+    /// 有 token 变动才查余额，间隔仍是 interval；读不到用量日志时退回定时刷新
+    func maybeRefresh() {
+        if busy || inNight(cfg) { return }
+        if let last = lastAt, Date().timeIntervalSince(last) < Double(cfg.interval) { return }
+        guard cfg.refreshOnToken, UsageReader.shared.hasSource() else {
+            refresh()
+            return
+        }
+        let total = todayTok?.total
+        if tokMark == nil || total == nil || total != tokMark {
+            refresh()
+        }
+    }
+
+    func toggleTokenRefresh() {
+        cfg.refreshOnToken.toggle()
+        save()
+        if !cfg.refreshOnToken { refresh() }
     }
 
     func toggleNight() {

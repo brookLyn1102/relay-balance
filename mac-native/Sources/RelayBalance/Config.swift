@@ -33,6 +33,7 @@ struct Account: Codable, Identifiable, Hashable {
 struct Config: Codable {
     var provider: String?
     var interval: Int = 600
+    var refreshOnToken: Bool = true
     var nightPause: Bool = true
     var nightFrom: Double = 21
     var nightTo: Double = 8.5
@@ -52,6 +53,7 @@ struct Config: Codable {
 
     enum CodingKeys: String, CodingKey {
         case provider, interval, accounts, active, topmost
+        case refreshOnToken = "refresh_on_token"
         case nightPause = "night_pause"
         case nightFrom = "night_from"
         case nightTo = "night_to"
@@ -74,6 +76,7 @@ struct Config: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
         interval = try c.decodeIfPresent(Int.self, forKey: .interval) ?? 600
+        refreshOnToken = try c.decodeIfPresent(Bool.self, forKey: .refreshOnToken) ?? true
         nightPause = try c.decodeIfPresent(Bool.self, forKey: .nightPause) ?? true
         nightFrom = try c.decodeIfPresent(Double.self, forKey: .nightFrom) ?? 21
         nightTo = try c.decodeIfPresent(Double.self, forKey: .nightTo) ?? 8.5

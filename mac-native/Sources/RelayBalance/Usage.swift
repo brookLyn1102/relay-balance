@@ -116,6 +116,21 @@ final class UsageReader {
     private var tail: [String: DayAgg] = [:]
     private var tailOffset: [String: UInt64] = [:]
     private var ccToday: (t: TimeInterval, agg: DayAgg?)?
+    private var sourceCache: (ok: Bool, at: Date)?
+
+    /// 本机有没有可读的用量记录；没有的话「按 token 变动刷新余额」就没法用
+    func hasSource() -> Bool {
+        if let c = sourceCache, Date().timeIntervalSince(c.at) < 300 { return c.ok }
+        var ok = false
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: Paths.magpieRouting.path) {
+            ok = items.contains { $0.hasSuffix(".jsonl") }
+        }
+        if !ok {
+            ok = FileManager.default.fileExists(atPath: Paths.ccswitchDB.path)
+        }
+        sourceCache = (ok, Date())
+        return ok
+    }
 
     // ---- magpie
 

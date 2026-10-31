@@ -51,6 +51,8 @@ CCSWITCH_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
 DEFAULT_CONFIG = {
     "provider": None,        # 留空则自动取 magpie 里第一个可用供应商
     "interval": 600,
+    # 只在今日 token 有增长时才照这个间隔查余额；没用量就不白打接口
+    "refresh_on_token": True,
     # 夜间暂停：这段时间不查额度（省中转调用，也让界面安静）
     "night_pause": True,
     "night_from": 21,        # 21:00 起
@@ -637,6 +639,8 @@ class Widget:
         self.status_text = ""        # 状态栏当前文案，弹提示后用来还原
         self.status_color = MUTED
         self._flash_job = None
+        self.last_refresh = 0.0      # 上次查余额的时间（节流用）
+        self.tok_mark = None         # 上次查余额时的今日 token，用来判断有没有新用量
 
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
@@ -933,7 +937,40 @@ class Widget:
                 fn()
             except Exception:
                 pass
+        # 今日 token 只在真有用量时变；顺便决定要不要去查余额
+        self.auto_refresh()
         self.root.after(5000, self.tick_usage)
+
+    def tok_total(self):
+        """今日 token 总量；统计还没读出来时返回 None。"""
+        t = getattr(self, "today_tok", None)
+        if not isinstance(t, dict):
+            return None
+        return int(t.get("in", 0) or 0) + int(t.get("out", 0) or 0)
+
+    def auto_refresh(self):
+        """有 token 变动才查余额，间隔仍是 interval 秒。
+
+        没装 magpie / CC Switch（读不到用量）或手动关掉时，退回原来的定时刷新。
+        """
+        if self.busy or in_night(self.cfg):
+            return
+        interval = max(10, int(self.cfg["interval"]))
+        if time.time() - self.last_refresh < interval:
+            return
+        if not self.cfg.get("refresh_on_token", True) or not usage_stats.has_source():
+            self.refresh()
+            return
+        total = self.tok_total()
+        if total is None or self.tok_mark is None or total != self.tok_mark:
+            self.refresh()
+
+    def toggle_token_refresh(self):
+        self.cfg["refresh_on_token"] = not self.cfg.get("refresh_on_token", True)
+        save_config(self.cfg)
+        self.refresh_tray_menu()
+        if not self.cfg["refresh_on_token"]:
+            self.refresh()               # 关掉后马上补一次，别让人以为坏了
 
     def resize_height(self):
         try:
@@ -1387,6 +1424,7 @@ class Widget:
 
     def apply(self, data, error):
         self.busy = False
+        self.last_refresh = time.time()
         self._rf_style("idle")
         if error:
             self.ok = False
@@ -1424,6 +1462,7 @@ class Widget:
         self.status_text = time.strftime("%H:%M:%S 刷新", time.localtime(data["at"]))
         self.status_color = MUTED
         self.lb_status.config(text=self.status_text, fg=MUTED)
+        self.tok_mark = self.tok_total()
         self.draw_bar()
         if self.icon:
             try:
@@ -1460,7 +1499,7 @@ class Widget:
             if self.night_idle:
                 self.night_idle = False
                 self.update_interval_label()
-            self.refresh()
+            self.auto_refresh()
         self.root.after(delay, self.tick)
 
     # ---------------- 托盘
@@ -1526,6 +1565,10 @@ class Widget:
                 f"夜间暂停 {fmt_hm(self.cfg['night_from'])}–{fmt_hm(self.cfg['night_to'])}",
                 lambda item: self.root.after(0, self.toggle_night),
                 checked=lambda item: bool(self.cfg.get("night_pause", True))),
+            pystray.MenuItem(
+                "有用量才查余额",
+                lambda item: self.root.after(0, self.toggle_token_refresh),
+                checked=lambda item: bool(self.cfg.get("refresh_on_token", True))),
             pystray.MenuItem("网速条", bar_menu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("窗口置顶", toggle_top,

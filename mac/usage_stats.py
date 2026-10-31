@@ -23,6 +23,31 @@ CCSWITCH_DB = os.path.expanduser(os.path.join("~", ".cc-switch", "cc-switch.db")
 _FILE_CACHE = {}
 
 
+_SRC_CACHE = {"val": None, "ts": 0.0}
+
+
+def has_source():
+    """本机有没有可读的用量记录（magpie 的 jsonl 或 CC Switch 的库）。
+
+    没有来源时「今日 token」永远是 0，余额刷新就不能靠它触发。
+    结果缓存 5 分钟，省得每 5 秒去 stat 目录。
+    """
+    now = time.time()
+    if _SRC_CACHE["val"] is not None and now - _SRC_CACHE["ts"] < 300:
+        return _SRC_CACHE["val"]
+    ok = False
+    try:
+        if os.path.isdir(MAGPIE_DIR):
+            ok = any(n.endswith(".jsonl") for n in os.listdir(MAGPIE_DIR))
+    except Exception:
+        ok = False
+    if not ok:
+        ok = os.path.exists(CCSWITCH_DB)
+    _SRC_CACHE["val"] = ok
+    _SRC_CACHE["ts"] = now
+    return ok
+
+
 def fmt_tokens(n):
     """1,234,567 -> 1.23M"""
     n = int(n or 0)
