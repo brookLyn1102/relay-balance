@@ -7,7 +7,6 @@
 import ctypes
 import os
 import threading
-import time
 from ctypes import wintypes
 
 import applog
@@ -21,6 +20,7 @@ except Exception:                                     # 单独跑时也不能崩
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 
 WM_PAINT = 0x000F
 WM_ERASEBKGND = 0x0014
@@ -57,6 +57,7 @@ DT_LEFT = 0x0000
 DT_RIGHT = 0x0002
 DT_CENTER = 0x0001
 DT_NOPREFIX = 0x0800
+DT_END_ELLIPSIS = 0x8000
 SRCCOPY = 0x00CC0020
 TRANSPARENT = 1
 FW_BOLD = 700
@@ -114,6 +115,23 @@ class MSG(ctypes.Structure):
 
 class SIZE(ctypes.Structure):
     _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+class APPBARDATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uCallbackMessage", wintypes.UINT),
+        ("uEdge", wintypes.UINT),
+        ("rc", wintypes.RECT),
+        ("lParam", wintypes.LPARAM),
+    ]
+
+
+# 任务栏停靠边（SHAppBarMessage ABM_GETTASKBARPOS 的 uEdge）
+ABE_LEFT, ABE_TOP, ABE_RIGHT, ABE_BOTTOM = 0, 1, 2, 3
+ABM_GETTASKBARPOS = 5
+_EDGES = ("left", "top", "right", "bottom")
 
 
 user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
@@ -202,6 +220,8 @@ gdi32.DeleteDC.argtypes = [wintypes.HDC]
 gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                          ctypes.c_int, wintypes.HDC, ctypes.c_int, ctypes.c_int,
                          wintypes.DWORD]
+shell32.SHAppBarMessage.argtypes = [wintypes.DWORD, ctypes.POINTER(APPBARDATA)]
+shell32.SHAppBarMessage.restype = ctypes.c_size_t
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "taskbar_strip.log")
 
@@ -239,6 +259,27 @@ def fmt_money(v, sign=True):
     return ("-" + body) if (sign and v < 0) else body
 
 
+def fmt_speed_short(bps):
+    """竖排任务栏太窄，单位压成一个字母：9.9M / 812K / 1.2G。"""
+    if bps is None:
+        return "—"
+    v = float(bps)
+    for unit in ("B", "K", "M", "G"):
+        if v < 1024 or unit == "G":
+            return (f"{v:.0f}{unit}" if v >= 100 else f"{v:.1f}{unit}")
+        v /= 1024.0
+    return "—"
+
+
+def fmt_money_short(v, digits=2):
+    if v is None:
+        return "$—"
+    v = float(v)
+    if abs(v) >= 10000:
+        return f"${v / 1000:.1f}k"
+    return f"${v:.{digits}f}"
+
+
 class TaskbarStrip:
     """挂在任务栏里的网速条。对外接口和 Tk 版一致：tick() / destroy()。"""
 
@@ -256,6 +297,8 @@ class TaskbarStrip:
         self._alive = True
         self._w = 200
         self._h = 40
+        self.edge = "bottom"          # left / top / right / bottom
+        self.vertical = False         # 左/右停靠要走竖排布局
         self._font = None
         self._font_px = 0
         self._key = None
@@ -391,9 +434,42 @@ class TaskbarStrip:
         return user32.GetDC(self.hwnd)
 
     def _measure(self):
-        """用最宽的可能值定尺寸，数字变化时不抖。"""
-        tb_rc = wintypes.RECT()
-        user32.GetWindowRect(self._taskbar(), ctypes.byref(tb_rc))
+        """用最宽的可能值定尺寸，数字变化时不抖。
+
+        任务栏可以停在上/下/左/右四条边，左右停靠时厚度只有 40~60px，
+        横排三列根本放不下，得整体换成「一行一项」的竖排布局。
+        """
+        self.edge = self._detect_edge()
+        self.vertical = self.edge in ("left", "right")
+        tb_rc = self._tb_rect()
+        self._thick = (tb_rc.right - tb_rc.left) if self.vertical \
+            else (tb_rc.bottom - tb_rc.top)
+        if self.vertical:
+            self._measure_vertical(tb_rc)
+        else:
+            self._measure_horizontal(tb_rc)
+
+    def _tb_rect(self):
+        rc = wintypes.RECT()
+        user32.GetWindowRect(self._taskbar(), ctypes.byref(rc))
+        return rc
+
+    def _detect_edge(self):
+        """任务栏停在哪条边。SHAppBarMessage 拿不到时用矩形和屏幕比。"""
+        try:
+            abd = APPBARDATA()
+            abd.cbSize = ctypes.sizeof(APPBARDATA)
+            if shell32.SHAppBarMessage(ABM_GETTASKBARPOS, ctypes.byref(abd)) \
+                    and abd.uEdge <= 3:
+                return _EDGES[abd.uEdge]
+        except Exception as e:
+            _log("edge query fail", e)
+        rc = self._tb_rect()
+        if rc.right - rc.left >= rc.bottom - rc.top:
+            return "top" if rc.top <= 0 else "bottom"
+        return "left" if rc.left <= 0 else "right"
+
+    def _measure_horizontal(self, tb_rc):
         self._h = tb_rc.bottom - tb_rc.top
         self._font_px = max(12, int(self._h * 0.30))
         self._make_font()
@@ -442,6 +518,7 @@ class TaskbarStrip:
         if right_w:
             w += self._rgap + right_w
         self._w = int(w)
+
         self._net_w = net_w
         _log("measure", "h", self._h, "w", self._w, "font", self._font_px, "stack", self.stack)
 
@@ -456,21 +533,58 @@ class TaskbarStrip:
             OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             FF_MODERN, "Consolas")
 
+    def _measure_vertical(self, tb_rc):
+        """竖排：一屏一项，从上往下摆。左右停靠的任务栏只有 40~60px 厚，
+        原来的三列横排塞不下，字号和单位都得跟着瘦身。"""
+        thick = max(24, tb_rc.right - tb_rc.left)
+        length = max(60, tb_rc.bottom - tb_rc.top)
+        self.stack = True
+        self._w = max(18, thick - 2)
+        self.pad = max(4, int(thick * 0.10))
+        self._row_n = 2                                   # ↑ ↓
+        if self.cfg.get("bar_show_mem", True) and self._mem is not None:
+            self._row_n += 1
+        if self.cfg.get("bar_show_balance", True):
+            self._row_n += 1
+        if self.cfg.get("bar_show_token", True):
+            self._row_n += 1
+        self._font_px = max(10, int(thick * 0.26))
+        while True:
+            self._make_font()
+            row_h = self._font_px + max(3, int(self._font_px * 0.30))
+            total = row_h * self._row_n + self.pad * 2
+            if total <= length * 0.86 or self._font_px <= 9:
+                break
+            self._font_px -= 1
+        self._row_h = row_h
+        self._h = total
+        _log("measure vertical", self.edge, "w", self._w, "h", self._h,
+             "rows", self._row_n, "font", self._font_px)
+
     def _place(self):
         tb = self._taskbar()
         trc = wintypes.RECT()
         user32.GetWindowRect(tb, ctypes.byref(trc))
-        th = trc.bottom - trc.top
+        tw, th = trc.right - trc.left, trc.bottom - trc.top
+        dx = int(self.cfg.get("bar_dx") or 0)
+        dy = int(self.cfg.get("bar_dy") or 0)
         notify = user32.FindWindowExW(tb, None, "TrayNotifyWnd", None)
-        nx = 0
+        nrc = wintypes.RECT()
         if notify:
-            nrc = wintypes.RECT()
             user32.GetWindowRect(notify, ctypes.byref(nrc))
-            nx = nrc.left - trc.left
-        if nx <= 0:
-            nx = (trc.right - trc.left) - int(th * 1.85)      # 通知区宽度约 1.85 倍栏高
-        x = nx - self._w - 8 + int(self.cfg.get("bar_dx") or 0)
-        y = (th - self._h) // 2 + int(self.cfg.get("bar_dy") or 0)
+        if self.vertical:
+            # 通知区在竖排任务栏的最下面，条要压在它上方
+            ny = (nrc.top - trc.top) if notify else 0
+            if ny <= 0:
+                ny = th - int(tw * 1.85)
+            x = (tw - self._w) // 2 + dx
+            y = ny - self._h - 6 + dy
+        else:
+            nx = (nrc.left - trc.left) if notify else 0
+            if nx <= 0:
+                nx = tw - int(th * 1.85)                  # 通知区宽度约 1.85 倍栏高
+            x = nx - self._w - 8 + dx
+            y = (th - self._h) // 2 + dy
         user32.SetWindowPos(self.hwnd, None, x, y, self._w, self._h,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
@@ -550,6 +664,98 @@ class TaskbarStrip:
                 right.append((tok, self.fg))
         return left, mid, right
 
+    def _draw_horizontal(self, mem, w, h):
+        """上下停靠：网速上下两行，中间一列内存，右边金额 + token。"""
+        left, mid, right = self._segments()
+        x = self.pad
+        if self.stack:
+            dy = max(6, int(h * 0.215))
+            for i, (text, color) in enumerate(left[:2]):
+                gdi32.SetTextColor(mem, cref(color))
+                box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
+                                    x + self._net_w, h // 2 - dy + i * dy * 2 + dy // 2)
+                user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                 DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+            x += self._net_w
+            if mid:
+                x = self._draw_sep(mem, x, h)
+                # 中列两行，行位置与左侧完全一致
+                for i, (text, color) in enumerate(mid[:2]):
+                    gdi32.SetTextColor(mem, cref(color))
+                    box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
+                                        x + self._mid_w, h // 2 - dy + i * dy * 2 + dy // 2)
+                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                     DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX)
+                x = self._draw_sep(mem, x + self._mid_w, h)
+            if len(right) >= 2:
+                # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），紧贴竖线左对齐
+                for i, (text, color) in enumerate(right[:2]):
+                    cy = h // 2 - dy + i * dy * 2
+                    gdi32.SetTextColor(mem, cref(color))
+                    box = wintypes.RECT(x + self._rgap, cy - dy // 2, w - self.pad, cy + dy // 2)
+                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+            elif right:
+                text, color = right[0]
+                gdi32.SetTextColor(mem, cref(color))
+                box = wintypes.RECT(x + self._rgap, 0, w - self.pad, h)
+                user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                 DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+        else:
+            seq = list(left)
+            if mid:
+                seq.append((" ".join(t for t, _c in mid), mid[0][1]))
+            seq += right
+            for text, color in seq:
+                gdi32.SetTextColor(mem, cref(color))
+                box = wintypes.RECT(x, 0, w, h)
+                user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                                 DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+                sz = SIZE()
+                gdi32.GetTextExtentPoint32W(mem, text, len(text), ctypes.byref(sz))
+                x += sz.cx + self.gap
+
+    def _draw_vertical(self, mem, w, h):
+        """左右停靠：一行一项，居中，超宽自动省略号。"""
+        rows = self._row_texts()
+        if not rows:
+            return
+        row_h = max(1, h // len(rows))
+        for i, (text, color) in enumerate(rows):
+            if not text:
+                continue
+            gdi32.SetTextColor(mem, cref(color))
+            box = wintypes.RECT(2, i * row_h, w - 2, (i + 1) * row_h)
+            user32.DrawTextW(mem, text, -1, ctypes.byref(box),
+                             DT_SINGLELINE | DT_VCENTER | DT_CENTER
+                             | DT_NOPREFIX | DT_END_ELLIPSIS)
+
+    def _row_texts(self):
+        """竖排每行一项，单位压到最短，保证 40~60px 宽能塞下。"""
+        rows = [("↑" + fmt_speed_short(self.app.net.up), self.c_up),
+                ("↓" + fmt_speed_short(self.app.net.down), self.c_down)]
+        if self.cfg.get("bar_show_mem", True) and self._mem is not None:
+            try:
+                _gb, pct = self._mem()
+            except Exception:
+                pct = None
+            if pct is not None:
+                color = self.c_bad if pct >= 90 else (
+                    self.c_warn if pct >= 80 else self.fg)
+                rows.append((f"{pct:.0f}%", color))
+        if self.cfg.get("bar_show_balance", True):
+            wk = getattr(self.app, "week", None)
+            if wk:
+                # 任务栏越窄越省字：46px 的窄条放不下 $9,999.99 那种长度
+                digits = 2 if self._w >= 54 else 1
+                rows.append((fmt_money_short(wk.get("left"), digits),
+                             self._pct_color(wk.get("pct") or 0)))
+            else:
+                rows.append(("$—", self.c_dim))
+        if self.cfg.get("bar_show_token", True):
+            rows.append((self._tok_text().replace(" tok", ""), self.fg))
+        return rows
+
     def _paint(self, hwnd):
         self._theme()
         ps = PAINTSTRUCT()
@@ -569,54 +775,10 @@ class TaskbarStrip:
 
             gdi32.SetBkMode(mem, TRANSPARENT)
             gdi32.SelectObject(mem, self._font)
-            left, mid, right = self._segments()
-            x = self.pad
-            if self.stack:
-                dy = max(6, int(h * 0.215))
-                for i, (text, color) in enumerate(left[:2]):
-                    gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
-                                        x + self._net_w, h // 2 - dy + i * dy * 2 + dy // 2)
-                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
-                x += self._net_w
-                if mid:
-                    x = self._draw_sep(mem, x, h)
-                    # 中列两行，行位置与左侧完全一致
-                    for i, (text, color) in enumerate(mid[:2]):
-                        gdi32.SetTextColor(mem, cref(color))
-                        box = wintypes.RECT(x, h // 2 - dy + i * dy * 2 - dy // 2,
-                                            x + self._mid_w, h // 2 - dy + i * dy * 2 + dy // 2)
-                        user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                        DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX)
-                    x = self._draw_sep(mem, x + self._mid_w, h)
-                if len(right) >= 2:
-                    # 金额在上（对齐 ↑），今日 token 在下（对齐 ↓），紧贴竖线左对齐
-                    for i, (text, color) in enumerate(right[:2]):
-                        cy = h // 2 - dy + i * dy * 2
-                        gdi32.SetTextColor(mem, cref(color))
-                        box = wintypes.RECT(x + self._rgap, cy - dy // 2, w - self.pad, cy + dy // 2)
-                        user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
-                elif right:
-                    text, color = right[0]
-                    gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x + self._rgap, 0, w - self.pad, h)
-                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
+            if self.vertical:
+                self._draw_vertical(mem, w, h)
             else:
-                seq = list(left)
-                if mid:
-                    seq.append((" ".join(t for t, _c in mid), mid[0][1]))
-                seq += right
-                for text, color in seq:
-                    gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x, 0, w, h)
-                    user32.DrawTextW(mem, text, -1, ctypes.byref(box),
-                                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
-                    sz = SIZE()
-                    gdi32.GetTextExtentPoint32W(mem, text, len(text), ctypes.byref(sz))
-                    x += sz.cx + self.gap
+                self._draw_horizontal(mem, w, h)
 
             gdi32.BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY)
             gdi32.SelectObject(mem, old_bmp)
@@ -636,6 +798,14 @@ class TaskbarStrip:
                 return 1
             if msg in (WM_APP_REDRAW, WM_TIMER):
                 self._theme()
+                # 配置变了、任务栏换了边、或者用户调了任务栏大小，都要重算尺寸
+                edge = self._detect_edge()
+                tb_rc = self._tb_rect()
+                thick = (tb_rc.right - tb_rc.left) if edge in ("left", "right") \
+                    else (tb_rc.bottom - tb_rc.top)
+                if edge != self.edge or thick != getattr(self, "_thick", None):
+                    _log("layout changed", self.edge, self._thick, "->", edge, thick)
+                    self._need_measure = True
                 if getattr(self, "_need_measure", False):
                     self._need_measure = False
                     self._measure()              # 配置变了要按新内容重算宽度

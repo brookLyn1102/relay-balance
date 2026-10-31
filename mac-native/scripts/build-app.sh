@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 NAME="中转管家"
 BUNDLE_ID="com.relay.balance"
-APP_VERSION="1.3.0"
+APP_VERSION="1.4.0"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 APP_DIR=".build/${NAME}.app"
 

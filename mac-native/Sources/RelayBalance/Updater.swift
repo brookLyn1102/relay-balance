@@ -67,7 +67,7 @@ private func fetchJSON(_ url: URL, timeout: TimeInterval = 15) throws -> Any {
 enum Updater {
     static let repo = "brookLyn1102/relay-balance"
     static let branch = "main"
-    static let version = "1.3.0"
+    static let version = "1.4.0"
 
     static var homePage: URL { URL(string: "https://github.com/\(repo)")! }
 
