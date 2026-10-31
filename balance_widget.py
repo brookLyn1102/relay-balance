@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -38,8 +39,10 @@ except Exception:                                    # 新条不可用时回退 
     TaskbarStrip = None
 
 import usage_stats
+import updater
 
 APP_NAME = "中转管家"
+APP_VERSION = "1.3.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 PROVIDERS_PATH = os.path.expanduser("~/.config/magpie/providers.json")
@@ -629,6 +632,11 @@ class Widget:
         self.settings = None
         self.week = None
         self.night_idle = False
+        self.update_info = None      # 最近一次检查更新的结果
+        self.updating = False        # 正在查 / 正在拉
+        self.status_text = ""        # 状态栏当前文案，弹提示后用来还原
+        self.status_color = MUTED
+        self._flash_job = None
 
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
@@ -667,6 +675,7 @@ class Widget:
         self.refresh()
         self.root.after(200, self.tick)
         self.root.after(900, self.tick_net)
+        self.root.after(8000, self.auto_check)
 
     def round_corners(self):
         round_window(self.root)
@@ -714,6 +723,16 @@ class Widget:
         self.btn_refresh.bind("<Button-1>", lambda e: self.refresh())
         self.btn_refresh.bind("<Enter>", lambda e: self._rf_style("hover"))
         self.btn_refresh.bind("<Leave>", lambda e: self._rf_style("idle"))
+
+        # 发现新版本才出现：贴在刷新圈左边，点了直接更新并重启
+        self.lb_update = tk.Label(head, text="可更新", bg=BG, fg=GREEN,
+                                  font=(self.f_zh, 8), cursor="hand2")
+        self.lb_update.pack(side="right", padx=(14, 8), pady=(4, 0),
+                            after=self.btn_refresh)
+        self.lb_update.pack_forget()
+        self.lb_update.bind("<Button-1>", lambda e: self.on_update_click())
+        self.lb_update.bind("<Enter>", self.on_update_hover)
+        self.lb_update.bind("<Leave>", lambda e: self.lb_update.config(fg=GREEN))
 
         body = tk.Frame(outer, bg=BG)
         body.pack(fill="x", padx=16, pady=(8, 0))
@@ -800,6 +819,8 @@ class Widget:
         self.menu.add_separator()
         self.menu.add_command(label="用量统计…", command=self.open_usage)
         self.menu.add_command(label="设置 / 换 Key", command=self.open_settings)
+        self.menu.add_command(label=f"检查更新（v{APP_VERSION}）",
+                              command=lambda: self.check_update(manual=True))
         self.menu.add_command(label="隐藏到托盘", command=self.hide)
         self.menu.add_command(label="退出", command=self.quit)
 
@@ -1137,6 +1158,189 @@ class Widget:
             pass
         self.root.destroy()
 
+    # ---------------- 更新
+
+    def auto_check(self):
+        """启动后查一次，之后每 6 小时一次；夜间不查，改成半小时醒一次等天亮。"""
+        if self.updating:
+            delay = 10 * 60 * 1000
+        elif in_night(self.cfg):
+            delay = 30 * 60 * 1000
+        else:
+            self.check_update(manual=False)
+            delay = 6 * 3600 * 1000
+        self.root.after(delay, self.auto_check)
+
+    def check_update(self, manual=False):
+        if self.updating:
+            return
+        self.updating = True
+        if manual:
+            self.lb_status.config(text="检查更新…", fg=MUTED)
+        self.refresh_tray_menu()
+        threading.Thread(target=self._check_worker, args=(manual,), daemon=True).start()
+
+    def _check_worker(self, manual):
+        try:
+            info = updater.check()
+        except Exception as exc:                    # updater 内部已兜底，这里再保一层
+            info = {"ok": False, "behind": 0, "can_pull": False,
+                    "error": str(exc)[:40]}
+        try:
+            self.root.after(0, lambda: self.apply_update(info, manual))
+        except Exception:
+            pass
+
+    def apply_update(self, info, manual=False):
+        self.updating = False
+        self.update_info = info
+        if not info.get("ok"):
+            self.hide_update_label()
+            if manual:
+                self.flash_status("检查更新失败：" + (info.get("error") or "未知"), AMBER)
+        elif info.get("behind", 0) > 0:
+            self.show_update_label(info)
+            if manual:
+                self.flash_status(f"↑ 可更新 {info['behind']} 个提交", GREEN)
+        else:
+            self.hide_update_label()
+            if manual:
+                self.flash_status(f"已是最新 v{APP_VERSION}", GREEN)
+        self.refresh_tray_menu()
+
+    def show_update_label(self, info):
+        # 放在标题栏刷新圈左边，底部一行留给状态文字和刷新间隔
+        try:
+            self.lb_update.config(text="可更新")
+            if not self.lb_update.winfo_ismapped():
+                self.lb_update.pack(side="right", padx=(14, 8), pady=(4, 0),
+                                    after=self.btn_refresh)
+        except Exception:
+            pass
+
+    def update_hint(self):
+        info = self.update_info or {}
+        msg = (info.get("message") or "").strip()
+        short = (msg[:16] + "…") if len(msg) > 16 else msg
+        self.flash_status(f"{info.get('remote') or ''} {short}".strip(), GREEN)
+
+    def on_update_hover(self, event=None):
+        try:
+            self.lb_update.config(fg=TEXT)
+        except Exception:
+            return
+        if (self.update_info or {}).get("message"):
+            self.update_hint()
+
+    def hide_update_label(self):
+        try:
+            if self.lb_update.winfo_ismapped():
+                self.lb_update.pack_forget()
+        except Exception:
+            pass
+
+    def update_menu_text(self):
+        if self.updating:
+            return "检查更新中…"
+        info = self.update_info
+        if info and info.get("ok") and info.get("behind", 0) > 0:
+            return f"↑ 更新到 {info.get('remote') or '最新'}"
+        return "检查更新"
+
+    def on_update_click(self):
+        if self.updating:
+            return
+        info = self.update_info
+        if not info or not info.get("ok") or info.get("behind", 0) <= 0:
+            self.check_update(manual=True)          # 第一次点：先查
+            return
+        if not info.get("can_pull"):
+            url = info.get("url") or updater.HOME_PAGE
+            try:
+                os.startfile(url)
+            except Exception:
+                import webbrowser
+                webbrowser.open(url)
+            self.flash_status("已打开 GitHub 页面", MUTED)
+            return
+        self.do_pull()
+
+    def do_pull(self):
+        self.updating = True
+        self.lb_status.config(text="正在更新…", fg=MUTED)
+        self.refresh_tray_menu()
+        threading.Thread(target=self._pull_worker, daemon=True).start()
+
+    def _pull_worker(self):
+        try:
+            ok, msg = updater.pull()
+        except Exception as exc:
+            ok, msg = False, str(exc)[:40]
+        try:
+            self.root.after(0, lambda: self.after_pull(ok, msg))
+        except Exception:
+            pass
+
+    def after_pull(self, ok, msg):
+        self.updating = False
+        if ok:
+            self.lb_status.config(text="更新完成，正在重启…", fg=GREEN)
+            self.root.after(800, self.restart)
+        else:
+            self.flash_status("更新失败：" + msg[:24], RED, hold=6000)
+        self.refresh_tray_menu()
+
+    def flash_status(self, text, color=MUTED, hold=3600):
+        """状态栏临时写一句话，过几秒还原成上次刷新时间。"""
+        try:
+            self.lb_status.config(text=text, fg=color)
+        except Exception:
+            return
+        if self._flash_job:
+            try:
+                self.root.after_cancel(self._flash_job)
+            except Exception:
+                pass
+        self._flash_job = self.root.after(hold, self.restore_status)
+
+    def restore_status(self):
+        self._flash_job = None
+        if self.busy:
+            return
+        try:
+            self.lb_status.config(text=self.status_text or "", fg=self.status_color)
+        except Exception:
+            pass
+
+    def restart(self):
+        """重启自己：先放掉单实例锁，拉起新进程，再退出。"""
+        try:
+            self.save_pos()
+            self.destroy_strip()
+            self.icon.stop()
+        except Exception:
+            pass
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            cand = exe[:-len("python.exe")] + "pythonw.exe"
+            if os.path.exists(cand):
+                exe = cand
+        flags = 0
+        if os.name == "nt":
+            flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        release_mutex()
+        try:
+            subprocess.Popen([exe, os.path.abspath(__file__)], cwd=HERE,
+                             close_fds=True, creationflags=flags)
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
     # ---------------- 刷新
 
     def _rf_style(self, state):
@@ -1187,7 +1391,9 @@ class Widget:
         if error:
             self.ok = False
             self.dot.itemconfig(1, fill=RED)
-            self.lb_status.config(text=self.short_error(error), fg=RED)
+            self.status_text = self.short_error(error)
+            self.status_color = RED
+            self.lb_status.config(text=self.status_text, fg=RED)
             if self.data is None:
                 self.lb_left.config(text="—")
                 self.lb_pct.config(text="")
@@ -1215,7 +1421,9 @@ class Widget:
         self.lb_detail.config(text=detail_txt)
         self.lb_pool.config(
             text=f"总额度 ${data['total']:,.2f}   ·   已用 ${data['used']:,.2f}")
-        self.lb_status.config(text=time.strftime("%H:%M:%S 刷新", time.localtime(data["at"])), fg=MUTED)
+        self.status_text = time.strftime("%H:%M:%S 刷新", time.localtime(data["at"]))
+        self.status_color = MUTED
+        self.lb_status.config(text=self.status_text, fg=MUTED)
         self.draw_bar()
         if self.icon:
             try:
@@ -1311,6 +1519,8 @@ class Widget:
             pystray.MenuItem("立即刷新", lambda item: self.root.after(0, self.refresh)),
             pystray.MenuItem("用量统计…", lambda item: self.root.after(0, self.open_usage)),
             pystray.MenuItem("设置 / 换 Key", lambda item: self.root.after(0, self.open_settings)),
+            pystray.MenuItem(lambda item: self.update_menu_text(),
+                             lambda item: self.root.after(0, self.on_update_click)),
             pystray.MenuItem("刷新间隔", interval_menu()),
             pystray.MenuItem(
                 f"夜间暂停 {fmt_hm(self.cfg['night_from'])}–{fmt_hm(self.cfg['night_to'])}",
@@ -1677,7 +1887,7 @@ class SettingsWindow(tk.Toplevel):
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.destroy())
 
-        tk.Label(outer, text="Key 只存在本机 config.json，不会上传",
+        tk.Label(outer, text=f"Key 只存在本机 config.json，不会上传　·　v{APP_VERSION}",
                  bg=BG, fg=MUTED, font=(self.f, 8), anchor="w").pack(fill="x", padx=14, pady=(2, 0))
 
         wrap = tk.Frame(outer, bg=LINE, padx=1, pady=1)
@@ -2236,11 +2446,27 @@ class UsageWindow(tk.Toplevel):
 
 # ---------------------------------------------------------------- 入口
 
+MUTEX_HANDLE = None
+
+
 def single_instance():
+    global MUTEX_HANDLE
     handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\RelayBalanceWidget")
+    MUTEX_HANDLE = handle
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         return False, handle
     return True, handle
+
+
+def release_mutex():
+    """更新后重启前必须先放锁，否则新进程会以为「已经在运行」。"""
+    global MUTEX_HANDLE
+    try:
+        if MUTEX_HANDLE:
+            ctypes.windll.kernel32.CloseHandle(MUTEX_HANDLE)
+    except Exception:
+        pass
+    MUTEX_HANDLE = None
 
 
 def main():

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - 配色
@@ -95,6 +96,17 @@ struct PanelView: View {
                     .font(.system(size: 10))
                     .foregroundColor(model.statusColor)
                 Spacer()
+                if let info = model.update, info.behind > 0 {
+                    Button {
+                        NSWorkspace.shared.open(info.url)
+                    } label: {
+                        Text("可更新")
+                            .font(.system(size: 10))
+                            .foregroundColor(Palette.green)
+                    }
+                    .buttonStyle(.plain)
+                    .help(info.message)
+                }
                 Picker("", selection: Binding(
                     get: { model.cfg.interval },
                     set: { model.setInterval($0) })) {

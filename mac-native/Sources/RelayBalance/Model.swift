@@ -13,6 +13,8 @@ final class Model: ObservableObject {
     @Published var statusText = "正在读取…"
     @Published var statusKind: StatusKind = .muted
     @Published var nightIdle = false
+    @Published var update: UpdateInfo?
+    @Published var checkingUpdate = false
 
     enum StatusKind {
         case muted, good, warn, bad
@@ -44,6 +46,9 @@ final class Model: ObservableObject {
             statusKind = .muted
         } else {
             refresh()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.autoCheckUpdate()
         }
     }
 
@@ -140,10 +145,69 @@ final class Model: ObservableObject {
         return String(msg.prefix(28))
     }
 
+    // MARK: 更新
+
+    /// 启动后查一次，之后每 6 小时一次；夜间不查，半小时醒一次等天亮
+    private func autoCheckUpdate() {
+        let delay: TimeInterval
+        if inNight(cfg) {
+            delay = 30 * 60
+        } else {
+            checkUpdate()
+            delay = 6 * 3600
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.autoCheckUpdate()
+        }
+    }
+
+    func checkUpdate(manual: Bool = false) {
+        if checkingUpdate { return }
+        checkingUpdate = true
+        if manual {
+            statusText = "检查更新…"
+            statusKind = .muted
+        }
+        onChange?()
+
+        DispatchQueue.global(qos: .utility).async {
+            let result: Result<UpdateInfo, Error>
+            do {
+                result = .success(try Updater.check())
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async { self.applyUpdate(result, manual: manual) }
+        }
+    }
+
+    private func applyUpdate(_ result: Result<UpdateInfo, Error>, manual: Bool) {
+        checkingUpdate = false
+        switch result {
+        case .success(let info):
+            update = info
+            if manual {
+                if info.behind > 0 {
+                    statusText = "可更新 \(info.behind) 个提交 · \(info.remote ?? "")"
+                    statusKind = .good
+                } else {
+                    statusText = "已是最新 v\(Updater.version)"
+                    statusKind = .good
+                }
+            }
+        case .failure(let error):
+            update = nil
+            if manual {
+                statusText = shortError(error.localizedDescription)
+                statusKind = .bad
+            }
+        }
+        onChange?()
+    }
+
     // MARK: 配置
 
-    func save() {
-        ConfigStore.save(cfg)
+    func save() {        ConfigStore.save(cfg)
         onChange?()
     }
 

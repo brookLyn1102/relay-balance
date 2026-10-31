@@ -99,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.target = self
         menu.addItem(settings)
 
+        let update = NSMenuItem(title: updateMenuTitle(), action: #selector(checkUpdateAction), keyEquivalent: "")
+        update.target = self
+        menu.addItem(update)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q")
@@ -153,6 +157,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleNight() {
         model.toggleNight()
+    }
+
+    // MARK: 更新
+
+    private func updateMenuTitle() -> String {
+        if model.checkingUpdate { return "检查更新中…" }
+        if let info = model.update, info.behind > 0 {
+            return "可更新 · \(info.remote ?? "")"
+        }
+        return "检查更新（v\(Updater.version)）"
+    }
+
+    @objc private func checkUpdateAction() {
+        if let info = model.update, info.behind > 0 {
+            // .app 是本地编译的，自己拉不了代码，直接开提交页
+            NSWorkspace.shared.open(info.url)
+        } else {
+            model.checkUpdate(manual: true)
+        }
     }
 
     @objc private func quitApp() {

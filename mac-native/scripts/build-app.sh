@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 
 NAME="中转管家"
 BUNDLE_ID="com.relay.balance"
+APP_VERSION="1.3.0"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 APP_DIR=".build/${NAME}.app"
 
 echo "==> swift build -c release"
@@ -32,8 +34,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>RelayBalance</string>
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+  <key>CFBundleVersion</key><string>${APP_VERSION}</string>
+  <key>RelayCommit</key><string>${COMMIT}</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
