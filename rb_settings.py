@@ -50,7 +50,7 @@ class SettingsWindow(tk.Toplevel):
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.destroy())
 
-        tk.Label(outer, text=f"Key 只存在本机 config.json，不会上传　·　v{APP_VERSION}",
+        tk.Label(outer, text="Key 只存在本机 config.json，不会上传",
                  bg=BG, fg=MUTED, font=(self.f, 8), anchor="w").pack(fill="x", padx=14, pady=(2, 0))
 
         wrap = tk.Frame(outer, bg=LINE, padx=1, pady=1)
@@ -117,6 +117,15 @@ class SettingsWindow(tk.Toplevel):
         self.set_entry(self.e_spent, f"{spent:.2f}")
         tk.Label(wrow, text="额度 − 总池剩余", bg=BG, fg=MUTED,
                  font=(self.f, 8)).pack(side="right")
+
+        vrow = tk.Frame(outer, bg=BG)
+        vrow.pack(fill="x", padx=14, pady=(9, 0))
+        tk.Label(vrow, text=f"版本 v{APP_VERSION}", bg=BG, fg=MUTED,
+                 font=(self.f, 8)).pack(side="left")
+        self.lb_chk = self.pill(vrow, "检查更新", self.check_update, fg=MUTED)
+        self.lb_chk.configure(font=(self.f, 8), padx=8, pady=3)
+        self.lb_chk.pack(side="right")
+        self._sync_update_btn()
 
         self.lb_msg = tk.Label(outer, text="", bg=BG, fg=MUTED, font=(self.f, 8), anchor="w")
         self.lb_msg.pack(fill="x", padx=14, pady=(8, 0))
@@ -325,6 +334,42 @@ class SettingsWindow(tk.Toplevel):
             self.after(0, lambda: self.msg(text, color))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def check_update(self):
+        """手动查一次 GitHub，结果直接写在下面那行提示里。"""
+        if getattr(self.app, "updating", False):
+            self.msg("正在检查中，稍等…")
+            return
+        self.lb_chk.config(text="检查中…", fg=MUTED)
+        self.msg("")
+        try:
+            self.app.check_update(manual=True, on_done=self._on_update)
+        except Exception as exc:
+            self.lb_chk.config(text="检查更新", fg=MUTED)
+            self.msg("检查更新失败：" + str(exc)[:30], RED)
+
+    def _on_update(self, info):
+        self._sync_update_btn(info)
+        if not info.get("ok"):
+            self.msg("检查更新失败：" + (info.get("error") or "未知"), RED)
+        elif info.get("behind", 0) > 0:
+            self.msg(f"发现 {info['behind']} 个新提交（{info.get('remote') or ''}）"
+                     "· 托盘菜单可更新", GREEN)
+        else:
+            self.msg(f"已是最新 v{APP_VERSION}", GREEN)
+
+    def _sync_update_btn(self, info=None):
+        """只有查到更新才改变按钮文案；已经是最新就保持可再点。"""
+        if info is None:
+            info = getattr(self.app, "update_info", None) or {}
+        if info.get("ok") and info.get("behind", 0) > 0:
+            text, color = f"↑ 可更新 {info['behind']}", GREEN
+        else:
+            text, color = "检查更新", MUTED
+        try:
+            self.lb_chk.config(text=text, fg=color)
+        except Exception:
+            pass
 
     def apply_week_cfg(self, event=None):
         """回车即生效，不用改账号也能调额度。"""

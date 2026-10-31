@@ -701,27 +701,32 @@ class Widget:
             delay = 6 * 3600 * 1000
         self.root.after(delay, self.auto_check)
 
-    def check_update(self, manual=False):
+    def check_update(self, manual=False, on_done=None):
+        """on_done(info) 是给设置窗用的：查完直接回话，不用去面板上找状态。"""
         if self.updating:
+            if on_done:                     # 已经在查了，别开第二条线程
+                self.root.after(0, lambda: on_done(
+                    {"ok": False, "behind": 0, "error": "正在检查中"}))
             return
         self.updating = True
         if manual:
             self.lb_status.config(text="检查更新…", fg=MUTED)
         self.refresh_tray_menu()
-        threading.Thread(target=self._check_worker, args=(manual,), daemon=True).start()
+        threading.Thread(target=self._check_worker, args=(manual, on_done),
+                         daemon=True).start()
 
-    def _check_worker(self, manual):
+    def _check_worker(self, manual, on_done=None):
         try:
             info = updater.check()
         except Exception as exc:                    # updater 内部已兜底，这里再保一层
             info = {"ok": False, "behind": 0, "can_pull": False,
                     "error": str(exc)[:40]}
         try:
-            self.root.after(0, lambda: self.apply_update(info, manual))
+            self.root.after(0, lambda: self.apply_update(info, manual, on_done))
         except Exception:
             pass
 
-    def apply_update(self, info, manual=False):
+    def apply_update(self, info, manual=False, on_done=None):
         self.updating = False
         self.update_info = info
         if not info.get("ok"):
@@ -737,6 +742,11 @@ class Widget:
             if manual:
                 self.flash_status(f"已是最新 v{APP_VERSION}", GREEN)
         self.refresh_tray_menu()
+        if on_done:
+            try:
+                on_done(info)
+            except Exception as exc:
+                applog.log("update hook 失败:", exc)
 
     def show_update_label(self, info):
         # 放在标题栏刷新圈左边，底部一行留给状态文字和刷新间隔
