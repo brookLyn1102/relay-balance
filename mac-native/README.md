@@ -2,8 +2,8 @@
 
 用 Swift + SwiftUI 重写的菜单栏版，不再依赖 Python 和 pip 包。界面和功能跟 `../mac/`（Python 版）一致：
 
-- 菜单栏显示 `↑速度 ↓速度  $余额  今日 token  内存`
-- 点图标弹出面板：余额大字、本周占用进度条、总额度 / 已用、今日 token、可用内存、实时网速
+- 菜单栏分四组，每组上下两行，中间用竖线分隔：`内存% / MEM`、`CPU温度 / CPU`、`↑速度 / ↓速度`、`$余额 / 今日token`；今日 token 为 0 时不占位，余额那一行自动放大
+- 点图标弹出面板：余额大字、本周占用进度条、总额度 / 已用、今日 token、可用内存、CPU 温度、实时网速
 - 右键菜单：立即刷新、刷新间隔、夜间暂停、有用量才查余额、用量统计、设置、检查更新、打开日志、退出
 - 设置窗口：多账号（地址 / Key）、一键读 magpie 或 CC Switch 的现有配置、测试连接
 - 用量统计：今日 / 本周 / 本月、近 7 天、按月、本月按模型
@@ -38,6 +38,7 @@ Sources/RelayBalance/
   Balance.swift     额度查询（URLSession）、周额度换算、格式化
   Usage.swift       token 统计（magpie jsonl + CC Switch sqlite）
   System.swift      网速（getifaddrs）、内存（host_statistics64）
+  Thermal.swift     CPU 温度（IOHID 传感器，私有 API）
   Model.swift       状态与定时刷新
   PanelView.swift   主面板
   SettingsView.swift  设置
@@ -55,3 +56,12 @@ scripts/build-app.sh
 | 内存占用 | 两个进程（菜单栏 + 面板）约 80MB | 单进程，约 30MB |
 
 Python 版保留在 `../mac/`，随时可以回退。
+
+## 关于 CPU 温度
+
+macOS 没有公开的温度 API，这里走 `IOHIDEventSystemClient` 的传感器服务（Stats、Hot 用的也是这条路）。几点要说明：
+
+- 属于**私有 API**，App Store 不会收；自己编译、自签分发没有影响。符号用 `dlsym` 动态取，不会在编译期链接。
+- Apple Silicon 上读的是 `PMU tdie*` / `PMU2 tdie*`（性能核 / 能效核各一组，一般十几个），取平均值，比单读一个核心稳。
+- 不需要 root，也不需要额外授权。
+- Intel 机型或系统收紧读不到时返回空值，菜单栏和面板里这一项**自动隐藏**，不影响其它功能。
