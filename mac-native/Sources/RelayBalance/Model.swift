@@ -53,6 +53,7 @@ final class Model: ObservableObject {
         } else {
             statusText = "余额查询已关闭"
             statusKind = .muted
+            Log.write("余额查询已关闭，跳过启动查询")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             self?.autoCheckUpdate()
@@ -280,6 +281,7 @@ final class Model: ObservableObject {
         if value {
             statusText = "刷新中…"
             statusKind = .muted
+            Log.write("重新开启余额查询")
             refresh()
         } else {
             balance = nil
@@ -287,6 +289,7 @@ final class Model: ObservableObject {
             busy = false
             statusText = "余额查询已关闭"
             statusKind = .muted
+            Log.write("关闭余额查询，停止请求中转接口")
         }
     }
 
