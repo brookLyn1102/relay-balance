@@ -29,24 +29,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 状态栏
 
-    /// 上传 / 下载上下叠放的小图。
-    ///
-    /// 不能用「title 里塞换行」：NSStatusBarButton 的 cell 是单行的，换行会被裁掉。
-    /// 所以画成图片，再用 template 模式让它在深浅色菜单栏下自动反色。
-    /// 菜单栏只有 NSStatusBar.system.thickness（22pt）高，9pt 字两行正好占满，
-    /// 11pt 要 26pt 会露出半行；字号是这里唯一的可调项。
-    private func speedImage(up: String, down: String) -> NSImage {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        let upText = NSAttributedString(string: "↑" + up, attributes: [.font: font])
-        let downText = NSAttributedString(string: "↓" + down, attributes: [.font: font])
-        let width = ceil(max(upText.size().width, downText.size().width))
-        let height = NSStatusBar.system.thickness
+    /// 菜单栏上的一组内容：上行是数字，下行是第二行（速度的下行是下载值，
+    /// 内存 / token 的下行是说明性小字）。
+    private struct StatusBlock {
+        var top: String
+        var bottom: String?
+        var bottomSmall: Bool = false
+    }
 
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: true) { _ in
-            let top = max(0, (height - lineHeight * 2) / 2)
-            upText.draw(at: NSPoint(x: 0, y: top))
-            downText.draw(at: NSPoint(x: 0, y: top + lineHeight))
+    /// 把若干组内容画成一张 template 图。
+    ///
+    /// 不能用 title 拼换行——NSStatusBarButton 的 cell 是单行的，换行会被裁。
+    /// 菜单栏高度是 NSStatusBar.system.thickness（22pt），9pt 字一行占 11pt，
+    /// 两行正好 22pt；11pt 要 26pt 会露出半行。所以数字一律 9pt，
+    /// MEM / tok 这类说明性小字再降到 7.5pt，既省高度又有层次。
+    /// 画成 template 图后，深浅色菜单栏下会自动反色。
+    private func statusImage(_ blocks: [StatusBlock]) -> NSImage {
+        let mainFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let capFont = NSFont.monospacedDigitSystemFont(ofSize: 7.5, weight: .medium)
+        let thickness = NSStatusBar.system.thickness
+        let lineH = ceil(mainFont.ascender - mainFont.descender + mainFont.leading)
+        let capH = ceil(capFont.ascender - capFont.descender + capFont.leading)
+        let columnGap: CGFloat = 7
+        let padX: CGFloat = 1
+
+        func font(for block: StatusBlock) -> NSFont {
+            block.bottomSmall ? capFont : mainFont
+        }
+        func width(of text: String, _ font: NSFont) -> CGFloat {
+            ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
+        }
+
+        // 每组宽度取上下两行里更宽的那个，保证块内左对齐、块间不互相挤
+        let widths: [CGFloat] = blocks.map { block in
+            let topWidth = width(of: block.top, mainFont)
+            guard let bottom = block.bottom else { return topWidth }
+            return max(topWidth, width(of: bottom, font(for: block)))
+        }
+        let totalWidth = padX * 2 + widths.reduce(0, +)
+            + columnGap * CGFloat(max(0, blocks.count - 1))
+        let stackTop = max(0, (thickness - lineH * 2) / 2)
+
+        let image = NSImage(size: NSSize(width: totalWidth, height: thickness), flipped: true) { _ in
+            var x = padX
+            for (index, block) in blocks.enumerated() {
+                let topText = NSAttributedString(string: block.top, attributes: [.font: mainFont])
+                if let bottom = block.bottom {
+                    let bottomFont = font(for: block)
+                    let bottomText = NSAttributedString(string: bottom, attributes: [.font: bottomFont])
+                    topText.draw(at: NSPoint(x: x, y: stackTop))
+                    // 小字在自己的行框里垂直居中，避免看着往上顶
+                    let offset = block.bottomSmall ? (lineH - capH) / 2 : 0
+                    bottomText.draw(at: NSPoint(x: x, y: stackTop + lineH + offset))
+                } else {
+                    // 只有一行时垂直居中，跟原来单行状态栏的观感一致
+                    topText.draw(at: NSPoint(x: x, y: max(0, (thickness - lineH) / 2)))
+                }
+                x += widths[index] + columnGap
+            }
             return true
         }
         image.isTemplate = true
@@ -55,37 +95,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateTitle() {
         guard let button = statusItem.button else { return }
-        var parts: [String] = []
-        var speedText = ""
+        var blocks: [StatusBlock] = []
+        var tooltip: [String] = []
+
+        // 顺序：内存 · 上传下载 · 余额（今日 token 叠在余额下面）
+        if model.cfg.menuMem, let m = model.mem {
+            blocks.append(StatusBlock(
+                top: String(format: "%.0f%%", m.usedPct),
+                bottom: "MEM",
+                bottomSmall: true
+            ))
+            tooltip.append(String(format: "内存已用 %.0f%% · 可用 %.1fG", m.usedPct, m.availableGB))
+        }
 
         if model.cfg.menuSpeed {
             let up = fmtSpeedShort(model.up)
             let down = fmtSpeedShort(model.down)
-            button.image = speedImage(up: up, down: down)
-            button.imagePosition = .imageLeft
-            speedText = "↑\(up) ↓\(down)"
-        } else {
-            button.image = nil
+            blocks.append(StatusBlock(top: "↑" + up, bottom: "↓" + down))
+            tooltip.append("↑\(up) ↓\(down)")
         }
+
+        let tokenText: String? = (model.cfg.menuToken ? model.todayTok : nil)
+            .map { fmtTokens($0.total) + " tok" }
 
         if model.cfg.menuBalance {
-            parts.append(model.balance.map { fmtMoney($0.left) } ?? "—")
+            let money = model.balance.map { fmtMoney($0.left) } ?? "—"
+            blocks.append(StatusBlock(top: money, bottom: tokenText, bottomSmall: true))
+            tooltip.append("余额 " + money)
+        } else if let tokenText = tokenText {
+            // 余额关了但 token 还开着，单独占一组，否则会被一起吞掉
+            blocks.append(StatusBlock(top: tokenText, bottom: nil))
         }
-        if model.cfg.menuToken, let t = model.todayTok, t.total > 0 {
-            parts.append(fmtTokens(t.total))
+        if let tokenText = tokenText {
+            tooltip.append("今日 " + tokenText)
         }
-        if model.cfg.menuMem, let m = model.mem {
-            parts.append("内存 \(fmtMem(m.availableGB))")
-        }
-        let tail = parts.joined(separator: "  ")
-        let text = parts.isEmpty ? (speedText.isEmpty ? APP_NAME : "") : " " + tail
 
-        button.attributedTitle = NSAttributedString(
-            string: text,
-            attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
-        )
-        // 速度画成了图片，读屏和 hover 提示拿不到，这里补一份纯文字
-        button.toolTip = ([speedText] + parts).filter { !$0.isEmpty }.joined(separator: "  ")
+        guard !blocks.isEmpty else {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.attributedTitle = NSAttributedString(
+                string: APP_NAME,
+                attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
+            )
+            button.toolTip = APP_NAME
+            return
+        }
+
+        button.attributedTitle = NSAttributedString(string: "")
+        button.image = statusImage(blocks)
+        button.imagePosition = .imageOnly
+        // 内容全画成图片了，读屏和 hover 提示拿不到，补一份纯文字
+        button.toolTip = tooltip.joined(separator: "  ")
+        button.setAccessibilityLabel(button.toolTip)
     }
 
     @objc private func handleClick() {
