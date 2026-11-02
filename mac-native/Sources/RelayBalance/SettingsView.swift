@@ -102,6 +102,10 @@ struct SettingsView: View {
                     Toggle("面板：网速", isOn: bind(\.netPanel)).toggleStyle(.checkbox)
                     Toggle("面板：今日 token", isOn: bind(\.panelToken)).toggleStyle(.checkbox)
                     Toggle("显示内存", isOn: bind(\.menuMem)).toggleStyle(.checkbox)
+                    // 说明放 tooltip：设置窗高度固定，多一行会把底部按钮挤出去
+                    Toggle("CPU 温度", isOn: bind(\.menuTemp))
+                        .toggleStyle(.checkbox)
+                        .help("菜单栏显示 CPU 平均温度（Apple Silicon 走 IOHID 传感器读取，读不到时自动隐藏）")
                 }
                 HStack(spacing: 16) {
                     Toggle("菜单栏：速度", isOn: bind(\.menuSpeed)).toggleStyle(.checkbox)

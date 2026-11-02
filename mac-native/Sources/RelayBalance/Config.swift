@@ -50,6 +50,7 @@ struct Config: Codable {
     var panelToken: Bool = true
     var menuToken: Bool = true
     var menuMem: Bool = true
+    var menuTemp: Bool = true
 
     enum CodingKeys: String, CodingKey {
         case provider, interval, accounts, active, topmost
@@ -67,6 +68,7 @@ struct Config: Codable {
         case panelToken = "panel_token"
         case menuToken = "menu_token"
         case menuMem = "menu_mem"
+        case menuTemp = "menu_temp"
     }
 
     init() {}
@@ -93,6 +95,7 @@ struct Config: Codable {
         panelToken = try c.decodeIfPresent(Bool.self, forKey: .panelToken) ?? true
         menuToken = try c.decodeIfPresent(Bool.self, forKey: .menuToken) ?? true
         menuMem = try c.decodeIfPresent(Bool.self, forKey: .menuMem) ?? true
+        menuTemp = try c.decodeIfPresent(Bool.self, forKey: .menuTemp) ?? true
     }
 }
 

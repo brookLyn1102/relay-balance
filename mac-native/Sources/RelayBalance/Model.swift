@@ -7,6 +7,7 @@ final class Model: ObservableObject {
     @Published var week: WeekStat?
     @Published var todayTok: DayAgg?
     @Published var mem: MemInfo?
+    @Published var cpuTemp: Double?
     @Published var up: Double = 0
     @Published var down: Double = 0
     @Published var busy = false
@@ -69,6 +70,11 @@ final class Model: ObservableObject {
             }
             if cfg.menuMem {
                 mem = readMem()
+            }
+            // 温度只有读传感器这一步有开销（CopyServices 约 0.1ms），
+            // 跟内存一样 5 秒一轮就够，没必要每秒
+            if cfg.menuTemp {
+                cpuTemp = CPUTemp.shared.read()
             }
         }
 

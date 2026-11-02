@@ -119,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var blocks: [StatusBlock] = []
         var tooltip: [String] = []
 
-        // 顺序：内存 · 上传下载 · 余额（今日 token 叠在余额下面）
+        // 顺序：内存 · CPU 温度 · 上传下载 · 余额（今日 token 叠在余额下面）
         if model.cfg.menuMem, let m = model.mem {
             blocks.append(StatusBlock(
                 top: String(format: "%.0f%%", m.usedPct),
@@ -127,6 +127,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 bottomSmall: true
             ))
             tooltip.append(String(format: "内存已用 %.0f%% · 可用 %.1fG", m.usedPct, m.availableGB))
+        }
+
+        // 读不到温度（Intel 机型 / 系统收紧）时 cpuTemp 是 nil，这一组自动不占位
+        if model.cfg.menuTemp, let temp = model.cpuTemp {
+            blocks.append(StatusBlock(top: fmtTemp(temp), bottom: "CPU", bottomSmall: true))
+            tooltip.append(String(format: "CPU %.1f°C", temp))
         }
 
         if model.cfg.menuSpeed {

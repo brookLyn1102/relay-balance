@@ -114,6 +114,10 @@ struct PanelView: View {
                         .foregroundColor(m.usedPct >= 90 ? Palette.red
                                          : (m.usedPct >= 80 ? Palette.amber : Palette.muted))
                 }
+                if model.cfg.menuTemp, let t = model.cpuTemp {
+                    Text(String(format: "CPU %.0f°C · 平均 %d 个核心", t, CPUTemp.shared.coreCount))
+                        .foregroundColor(t >= 80 ? Palette.red : (t >= 65 ? Palette.amber : Palette.muted))
+                }
             }
             .font(.system(size: 11))
             .foregroundColor(Palette.muted)
