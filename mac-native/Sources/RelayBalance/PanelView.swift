@@ -84,26 +84,29 @@ struct PanelView: View {
             header
                 .padding(.bottom, 10)
 
-            HStack(alignment: .firstTextBaseline) {
-                Text(model.balance.map { fmtMoney($0.left) } ?? "—")
-                    .font(.system(size: 27, weight: .semibold, design: .rounded))
-                    .foregroundColor((model.balance?.left ?? 0) < 0 ? Palette.red : Palette.text)
-                Spacer()
-                if model.week != nil {
-                    Text(pct >= 1000 ? "本周 >999%" : String(format: "本周 %.0f%%", pct))
-                        .font(.system(size: 11))
-                        .foregroundColor(model.pctColor(pct))
+            // 取消勾选「余额」后整块不显示：这时候后台也不再请求中转接口
+            if model.cfg.menuBalance {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(model.balance.map { fmtMoney($0.left) } ?? "—")
+                        .font(.system(size: 27, weight: .semibold, design: .rounded))
+                        .foregroundColor((model.balance?.left ?? 0) < 0 ? Palette.red : Palette.text)
+                    Spacer()
+                    if model.week != nil {
+                        Text(pct >= 1000 ? "本周 >999%" : String(format: "本周 %.0f%%", pct))
+                            .font(.system(size: 11))
+                            .foregroundColor(model.pctColor(pct))
+                    }
                 }
+
+                progress
+                    .padding(.top, 8)
             }
 
-            progress
-                .padding(.top, 8)
-
             VStack(alignment: .leading, spacing: 4) {
-                if let w = model.week {
+                if model.cfg.menuBalance, let w = model.week {
                     Text(String(format: "本周 $%.2f / $%.0f", w.spent, w.quota))
                 }
-                if let b = model.balance {
+                if model.cfg.menuBalance, let b = model.balance {
                     Text(String(format: "总额度 $%.2f   ·   已用 $%.2f", b.total, b.used))
                 }
                 if let t = model.todayText {
@@ -184,7 +187,9 @@ struct PanelView: View {
             }
             .buttonStyle(.plain)
             .onHover { hoverRefresh = $0 }
-            .help("立即刷新")
+            .disabled(!model.cfg.menuBalance)
+            .opacity(model.cfg.menuBalance ? 1 : 0.35)
+            .help(model.cfg.menuBalance ? "立即刷新" : "余额查询已关闭")
 
             Button(action: onSettings) {
                 Image(systemName: "gearshape")

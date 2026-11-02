@@ -188,12 +188,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showMenu() {
         let menu = NSMenu()
+        // 关掉「余额」后，刷新相关几项都没意义，要手动变灰；
+        // 但 NSMenu 默认会自己算一遍 enablesItems，会把这个状态盖掉
+        menu.autoenablesItems = false
+        let balanceOn = model.cfg.menuBalance
 
         let refresh = NSMenuItem(title: "立即刷新余额", action: #selector(refreshNow), keyEquivalent: "r")
         refresh.target = self
+        refresh.isEnabled = balanceOn
         menu.addItem(refresh)
 
         let intervalItem = NSMenuItem(title: "刷新间隔", action: nil, keyEquivalent: "")
+        intervalItem.isEnabled = balanceOn
         let intervalMenu = NSMenu()
         for (sec, label) in INTERVALS {
             let item = NSMenuItem(title: label, action: #selector(setIntervalAction(_:)), keyEquivalent: "")
@@ -210,12 +216,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(toggleNight), keyEquivalent: "")
         night.target = self
         night.state = model.cfg.nightPause ? .on : .off
+        // 夜间暂停本来就只是「不查余额」，余额都关了自然也没意义
+        night.isEnabled = balanceOn
         menu.addItem(night)
 
         let tokenOnly = NSMenuItem(title: "有用量才查余额",
                                    action: #selector(toggleTokenRefresh), keyEquivalent: "")
         tokenOnly.target = self
         tokenOnly.state = model.cfg.refreshOnToken ? .on : .off
+        tokenOnly.isEnabled = balanceOn
         menu.addItem(tokenOnly)
 
         menu.addItem(.separator())

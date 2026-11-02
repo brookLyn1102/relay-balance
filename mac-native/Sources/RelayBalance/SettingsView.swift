@@ -97,20 +97,23 @@ struct SettingsView: View {
             Divider().padding(.vertical, 12)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("显示").font(.system(size: 11)).foregroundColor(Palette.muted)
-                HStack(spacing: 16) {
-                    Toggle("面板：网速", isOn: bind(\.netPanel)).toggleStyle(.checkbox)
-                    Toggle("面板：今日 token", isOn: bind(\.panelToken)).toggleStyle(.checkbox)
-                    Toggle("显示内存", isOn: bind(\.menuMem)).toggleStyle(.checkbox)
-                    // 说明放 tooltip：设置窗高度固定，多一行会把底部按钮挤出去
-                    Toggle("CPU 温度", isOn: bind(\.menuTemp))
+                Text("菜单栏显示（取消勾选后状态栏不再显示，也不再采集该项数据）")
+                    .font(.system(size: 11)).foregroundColor(Palette.muted)
+                HStack(spacing: 14) {
+                    Toggle("内存", isOn: flag(\.menuMem)).toggleStyle(.checkbox)
+                    Toggle("CPU 温度", isOn: flag(\.menuTemp))
                         .toggleStyle(.checkbox)
-                        .help("菜单栏显示 CPU 平均温度（Apple Silicon 走 IOHID 传感器读取，读不到时自动隐藏）")
+                        .help("Apple Silicon 走 IOHID 传感器读取，读不到时自动隐藏")
+                    Toggle("网速", isOn: flag(\.menuSpeed)).toggleStyle(.checkbox)
+                    Toggle("余额", isOn: flag(\.menuBalance))
+                        .toggleStyle(.checkbox)
+                        .help("取消后不再请求中转接口，面板里的余额 / 本周进度也一起隐藏")
+                    Toggle("token", isOn: flag(\.menuToken)).toggleStyle(.checkbox)
                 }
-                HStack(spacing: 16) {
-                    Toggle("菜单栏：速度", isOn: bind(\.menuSpeed)).toggleStyle(.checkbox)
-                    Toggle("菜单栏：余额", isOn: bind(\.menuBalance)).toggleStyle(.checkbox)
-                    Toggle("菜单栏：token", isOn: bind(\.menuToken)).toggleStyle(.checkbox)
+                HStack(spacing: 14) {
+                    Text("面板").font(.system(size: 11)).foregroundColor(Palette.muted)
+                    Toggle("网速", isOn: bind(\.netPanel)).toggleStyle(.checkbox)
+                    Toggle("今日 token", isOn: bind(\.panelToken)).toggleStyle(.checkbox)
                 }
             }
 
@@ -173,6 +176,15 @@ struct SettingsView: View {
         Binding(
             get: { model.cfg[keyPath: path] },
             set: { model.cfg[keyPath: path] = $0; model.save() }
+        )
+    }
+
+    /// 菜单栏的勾选项走这里：除了存配置，还要触发对应的副作用
+    /// （取消余额时停查并清缓存、重新勾上时立刻查一次）
+    private func flag(_ key: WritableKeyPath<Config, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { model.cfg[keyPath: key] },
+            set: { model.setMenuFlag(key, $0) }
         )
     }
 

@@ -44,12 +44,15 @@ final class Model: ObservableObject {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         // 启动先查一次；夜间就不打扰了
-        if inNight(cfg) {
+        if inNight(cfg) && cfg.menuBalance {
             nightIdle = true
             statusText = "夜间暂停 \(fmtHM(cfg.nightFrom))–\(fmtHM(cfg.nightTo))"
             statusKind = .muted
-        } else {
+        } else if cfg.menuBalance {
             refresh()
+        } else {
+            statusText = "余额查询已关闭"
+            statusKind = .muted
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             self?.autoCheckUpdate()
@@ -59,13 +62,16 @@ final class Model: ObservableObject {
     // MARK: 每秒
 
     private func onSecond() {
-        net.sample()
-        up = net.up
-        down = net.down
+        // 网速也按开关走：菜单栏和面板都不显示时，没必要每秒去读接口计数器
+        if cfg.menuSpeed || cfg.netPanel {
+            net.sample()
+            up = net.up
+            down = net.down
+        }
 
         tickCount += 1
         if tickCount % 5 == 1 {
-            if cfg.panelToken || cfg.refreshOnToken {
+            if cfg.panelToken || cfg.menuToken || cfg.refreshOnToken {
                 todayTok = UsageReader.shared.todayLive()
             }
             if cfg.menuMem {
@@ -78,7 +84,7 @@ final class Model: ObservableObject {
             }
         }
 
-        if inNight(cfg) {
+        if inNight(cfg) && cfg.menuBalance {
             if !nightIdle {
                 nightIdle = true
                 statusText = "夜间暂停 \(fmtHM(cfg.nightFrom))–\(fmtHM(cfg.nightTo))"
@@ -89,7 +95,12 @@ final class Model: ObservableObject {
         }
         if nightIdle {
             nightIdle = false
-            statusText = "已恢复刷新"
+            if cfg.menuBalance {
+                statusText = "已恢复刷新"
+            } else {
+                statusText = "余额查询已关闭"
+                statusKind = .muted
+            }
         }
 
         maybeRefresh()
@@ -99,6 +110,8 @@ final class Model: ObservableObject {
     // MARK: 刷新
 
     func refresh() {
+        // 关掉「余额」就彻底不查：不发请求，面板里那几项也一起隐藏
+        guard cfg.menuBalance else { return }
         if busy { return }
         busy = true
         statusText = "刷新中…"
@@ -118,6 +131,8 @@ final class Model: ObservableObject {
 
     private func apply(_ data: Balance) {
         busy = false
+        // 请求在途中被关掉了「余额」，回来的数据不能塞回去
+        guard cfg.menuBalance else { return }
         lastErrorAt = nil
         balance = data
         let w = weekSplit(cfg, pool: data.left)
@@ -132,6 +147,7 @@ final class Model: ObservableObject {
 
     private func applyError(_ message: String) {
         busy = false
+        guard cfg.menuBalance else { return }
         lastAt = Date()
         lastErrorAt = Date()
         statusText = shortError(message)
@@ -250,6 +266,30 @@ final class Model: ObservableObject {
         onChange?()
     }
 
+    /// 勾 / 取消勾选菜单栏的某一项。
+    ///
+    /// 除了存配置，余额这一项还要带副作用：取消勾选就立刻停查、把已缓存的数据
+    /// 清掉，否则面板会一直显示关掉之前的旧余额；重新勾上则马上查一次，
+    /// 不用等下一个刷新周期。
+    func setMenuFlag(_ key: WritableKeyPath<Config, Bool>, _ value: Bool) {
+        guard cfg[keyPath: key] != value else { return }
+        cfg[keyPath: key] = value
+        save()
+        guard key == \Config.menuBalance else { return }
+
+        if value {
+            statusText = "刷新中…"
+            statusKind = .muted
+            refresh()
+        } else {
+            balance = nil
+            week = nil
+            busy = false
+            statusText = "余额查询已关闭"
+            statusKind = .muted
+        }
+    }
+
     func setInterval(_ seconds: Int) {
         cfg.interval = seconds
         save()
@@ -259,6 +299,7 @@ final class Model: ObservableObject {
     /// 有 token 变动才查余额，间隔仍是 interval；读不到用量日志时退回定时刷新
     func maybeRefresh() {
         if busy || inNight(cfg) { return }
+        guard cfg.menuBalance else { return }
         if let last = lastAt, Date().timeIntervalSince(last) < Double(cfg.interval) { return }
         guard cfg.refreshOnToken, UsageReader.shared.hasSource() else {
             refresh()
