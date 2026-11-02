@@ -29,12 +29,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 状态栏
 
+    /// 上传 / 下载上下叠放的小图。
+    ///
+    /// 不能用「title 里塞换行」：NSStatusBarButton 的 cell 是单行的，换行会被裁掉。
+    /// 所以画成图片，再用 template 模式让它在深浅色菜单栏下自动反色。
+    /// 菜单栏只有 NSStatusBar.system.thickness（22pt）高，9pt 字两行正好占满，
+    /// 11pt 要 26pt 会露出半行；字号是这里唯一的可调项。
+    private func speedImage(up: String, down: String) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        let upText = NSAttributedString(string: "↑" + up, attributes: [.font: font])
+        let downText = NSAttributedString(string: "↓" + down, attributes: [.font: font])
+        let width = ceil(max(upText.size().width, downText.size().width))
+        let height = NSStatusBar.system.thickness
+
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: true) { _ in
+            let top = max(0, (height - lineHeight * 2) / 2)
+            upText.draw(at: NSPoint(x: 0, y: top))
+            downText.draw(at: NSPoint(x: 0, y: top + lineHeight))
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     private func updateTitle() {
         guard let button = statusItem.button else { return }
         var parts: [String] = []
+        var speedText = ""
+
         if model.cfg.menuSpeed {
-            parts.append("↑\(fmtSpeedShort(model.up)) ↓\(fmtSpeedShort(model.down))")
+            let up = fmtSpeedShort(model.up)
+            let down = fmtSpeedShort(model.down)
+            button.image = speedImage(up: up, down: down)
+            button.imagePosition = .imageLeft
+            speedText = "↑\(up) ↓\(down)"
+        } else {
+            button.image = nil
         }
+
         if model.cfg.menuBalance {
             parts.append(model.balance.map { fmtMoney($0.left) } ?? "—")
         }
@@ -44,11 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.cfg.menuMem, let m = model.mem {
             parts.append("内存 \(fmtMem(m.availableGB))")
         }
-        let text = parts.isEmpty ? APP_NAME : " " + parts.joined(separator: "  ")
+        let tail = parts.joined(separator: "  ")
+        let text = parts.isEmpty ? (speedText.isEmpty ? APP_NAME : "") : " " + tail
+
         button.attributedTitle = NSAttributedString(
             string: text,
             attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
         )
+        // 速度画成了图片，读屏和 hover 提示拿不到，这里补一份纯文字
+        button.toolTip = ([speedText] + parts).filter { !$0.isEmpty }.joined(separator: "  ")
     }
 
     @objc private func handleClick() {
