@@ -9,10 +9,36 @@ APP_VERSION="1.4.0"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 APP_DIR=".build/${NAME}.app"
 
-echo "==> swift build -c release"
-swift build -c release
+# SwiftPM 编译 Package.swift 的 manifest 时会自己套一层 sandbox-exec。
+# 在拿不到完整沙箱权限的环境里（CI 容器、受限 shell、被外层沙箱包住的
+# Agent 工具）这一步会直接失败：
+#   sandbox-exec: sandbox_apply: Operation not permitted
+# 普通终端和 Xcode 环境下不会走到这条路，所以先按默认编译，确认是这条
+# 报错再退到 --disable-sandbox 重试一次。
+build_release() {
+    local log
+    log="$(mktemp -t relay-balance-build)"
+    if swift build -c release >"$log" 2>&1; then
+        tail -n 3 "$log"
+        rm -f "$log"
+        return 0
+    fi
+    if grep -q "sandbox_apply: Operation not permitted" "$log"; then
+        echo "!! SwiftPM 沙箱不可用，改用 --disable-sandbox 重试（产物相同）" >&2
+        rm -f "$log"
+        swift build -c release --disable-sandbox
+        return $?
+    fi
+    cat "$log" >&2
+    rm -f "$log"
+    return 1
+}
 
-BIN_DIR="$(swift build -c release --show-bin-path)"
+echo "==> swift build -c release"
+build_release
+
+# --show-bin-path 同样要加载 manifest，受限环境下也会挂，挂就退回默认目录。
+BIN_DIR="$(swift build -c release --show-bin-path 2>/dev/null || echo ".build/release")"
 BIN="${BIN_DIR}/RelayBalance"
 
 if [ ! -f "$BIN" ]; then
