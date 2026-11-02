@@ -130,8 +130,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tooltip.append("↑\(up) ↓\(down)")
         }
 
+        // 今天还没用量（total == 0）时不占位，等有 token 了自动出现；
+        // 返回 nil 后余额那组只剩一行，由 statusImage 垂直居中
         let tokenText: String? = (model.cfg.menuToken ? model.todayTok : nil)
-            .map { fmtTokens($0.total) + " tok" }
+            .flatMap { $0.total > 0 ? fmtTokens($0.total) + " tok" : nil }
 
         if model.cfg.menuBalance {
             let money = model.balance.map { fmtMoney($0.left) } ?? "—"
