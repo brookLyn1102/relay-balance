@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let separatorWidth: CGFloat = 0.5
         let separatorPad: CGFloat = 5
         let separatorInset: CGFloat = 2
-        let separatorAlpha: CGFloat = 0.6
+        let separatorAlpha: CGFloat = 0.75
         let padX: CGFloat = 1
 
         func font(for block: StatusBlock) -> NSFont {
@@ -243,12 +243,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pop = NSPopover()
         pop.behavior = .transient
         pop.animates = true
-        pop.contentViewController = NSHostingController(rootView: PanelView(
+        let host = NSHostingController(rootView: PanelView(
             model: model,
             onClose: { [weak self] in self?.popover.performClose(nil) },
             onSettings: { [weak self] in self?.openSettings() },
             onUsage: { [weak self] in self?.openUsage() }
         ))
+        // 面板是自绘的深色底，但 AppKit 外观默认跟着系统走。不给宿主视图
+        // 指定 darkAqua 的话，系统控件会按浅色画：Picker 变黑字，在弹窗的
+        // vibrancy 下就是黑底黑字（完全看不见），TextField 则是刺眼的白底。
+        host.view.appearance = NSAppearance(named: .darkAqua)
+        pop.contentViewController = host
         popover = pop
     }
 
@@ -330,6 +335,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model: model,
                 onClose: { [weak window] in window?.close() }
             ))
+            // 同面板：内容是深色自绘，控件也得按深色画，否则 Picker / TextField 读不了
+            window.contentView?.appearance = NSAppearance(named: .darkAqua)
             window.center()
             settingsWindow = window
         }
@@ -351,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.contentView = NSHostingView(rootView: UsageView(
                 onClose: { [weak window] in window?.close() }
             ))
+            window.contentView?.appearance = NSAppearance(named: .darkAqua)
             window.center()
             usageWindow = window
         }
