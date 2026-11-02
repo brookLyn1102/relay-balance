@@ -133,10 +133,12 @@ func fmtSpeed(_ v: Double) -> String {
     return String(format: "%.2f MB/s", v / 1024 / 1024)
 }
 
+/// 菜单栏用的极简格式。单位必须带 /s —— 光写 ↑12.3K 看不出是速率，
+/// 容易被当成累计流量。面板那边用 fmtSpeed，写的是 KB/s / MB/s。
 func fmtSpeedShort(_ v: Double) -> String {
-    if v < 1024 { return String(format: "%.0fB", v) }
-    if v < 1024 * 1024 { return String(format: "%.0fK", v / 1024) }
-    return String(format: "%.1fM", v / 1024 / 1024)
+    if v < 1024 { return String(format: "%.0fB/s", v) }
+    if v < 1024 * 1024 { return String(format: "%.0fK/s", v / 1024) }
+    return String(format: "%.1fM/s", v / 1024 / 1024)
 }
 
 func fmtTokens(_ n: Int) -> String {
