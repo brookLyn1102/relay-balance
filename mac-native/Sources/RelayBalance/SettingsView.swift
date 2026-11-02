@@ -9,6 +9,9 @@ struct SettingsView: View {
     @State private var quotaText: String
     @State private var message = ""
     @State private var testing = false
+    /// 开机自启的状态不在 config.json 里，以系统登录项的实际状态为准
+    @State private var launchAtLogin = LoginItem.isEnabled
+    @State private var needApproval = LoginItem.needsApproval
 
     init(model: Model, onClose: @escaping () -> Void) {
         self.model = model
@@ -117,6 +120,25 @@ struct SettingsView: View {
                 }
             }
 
+            // macOS 12 没有 SMAppService，这一行整体不显示
+            if LoginItem.isSupported {
+                HStack(spacing: 14) {
+                    Text("启动").font(.system(size: 11)).foregroundColor(Palette.muted)
+                    Toggle("开机自启", isOn: Binding(
+                        get: { launchAtLogin },
+                        set: { setLaunchAtLogin($0) }))
+                        .toggleStyle(.checkbox)
+                        .help("登录 macOS 时自动启动，只出现在菜单栏，不占 Dock")
+                    if needApproval {
+                        Button("去系统设置允许") { LoginItem.openSystemSettings() }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                    }
+                    Spacer()
+                }
+                .padding(.top, 10)
+            }
+
             Spacer(minLength: 12)
 
             HStack {
@@ -132,9 +154,14 @@ struct SettingsView: View {
             }
         }
         .padding(18)
-        .frame(width: 520, height: 560)
+        .frame(width: 520, height: 592)
         .background(Palette.bg)
         .foregroundColor(Palette.text)
+        .onAppear {
+            // 用户可能在系统设置里直接关掉登录项，每次打开都以系统状态为准
+            launchAtLogin = LoginItem.isEnabled
+            needApproval = LoginItem.needsApproval
+        }
     }
 
     // MARK: 行
@@ -272,5 +299,17 @@ struct SettingsView: View {
         // 设置窗是复用同一个实例（isReleasedWhenClosed = false），
         // 不清掉的话下次打开还挂着上次的提示
         message = ""
+    }
+
+    /// 开机自启直接落到系统登录项里，不走 config.json——
+    /// 用户可能在系统设置里改过，配置文件和系统状态容易对不上
+    private func setLaunchAtLogin(_ on: Bool) {
+        message = LoginItem.set(on) ?? ""
+        launchAtLogin = LoginItem.isEnabled
+        needApproval = LoginItem.needsApproval
+        if needApproval {
+            message = "已登记，请在系统设置里允许"
+            LoginItem.openSystemSettings()
+        }
     }
 }

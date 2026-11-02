@@ -72,4 +72,4 @@ PLIST
 
 echo "==> 打包完成：$APP_DIR"
 echo "    双击打开：open \"$APP_DIR\""
-echo "    开机自启：把 .app 拖进「系统设置 → 通用 → 登录项」"
+echo "    开机自启：应用内「设置 → 启动 → 开机自启」（需 macOS 13+）"
