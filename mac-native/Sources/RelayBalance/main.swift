@@ -54,7 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 用半透明黑，template 图会按 alpha 反色，深色菜单栏下就是一条淡白线。
         let separatorWidth: CGFloat = 0.5
         let separatorPad: CGFloat = 5
-        let separatorInset: CGFloat = 4
+        let separatorInset: CGFloat = 2
+        let separatorAlpha: CGFloat = 0.6
         let padX: CGFloat = 1
 
         func font(for block: StatusBlock) -> NSFont {
@@ -94,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 if index < blocks.count - 1 {
                     x += separatorPad
-                    NSColor.black.withAlphaComponent(0.45).setFill()
+                    NSColor.black.withAlphaComponent(separatorAlpha).setFill()
                     NSRect(x: x, y: separatorInset,
                            width: separatorWidth,
                            height: thickness - separatorInset * 2).fill()
