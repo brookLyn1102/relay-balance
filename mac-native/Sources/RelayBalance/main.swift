@@ -50,7 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let thickness = NSStatusBar.system.thickness
         let lineH = ceil(mainFont.ascender - mainFont.descender + mainFont.leading)
         let capH = ceil(capFont.ascender - capFont.descender + capFont.leading)
-        let columnGap: CGFloat = 7
+        // 组间竖线：0.5pt 在 2x 屏上正好 1 个像素，比 1pt 细腻；
+        // 用半透明黑，template 图会按 alpha 反色，深色菜单栏下就是一条淡白线。
+        let separatorWidth: CGFloat = 0.5
+        let separatorPad: CGFloat = 5
+        let separatorInset: CGFloat = 4
         let padX: CGFloat = 1
 
         func font(for block: StatusBlock) -> NSFont {
@@ -66,8 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let bottom = block.bottom else { return topWidth }
             return max(topWidth, width(of: bottom, font(for: block)))
         }
+        let separatorCount = CGFloat(max(0, blocks.count - 1))
         let totalWidth = padX * 2 + widths.reduce(0, +)
-            + columnGap * CGFloat(max(0, blocks.count - 1))
+            + separatorCount * (separatorPad * 2 + separatorWidth)
         let stackTop = max(0, (thickness - lineH * 2) / 2)
 
         let image = NSImage(size: NSSize(width: totalWidth, height: thickness), flipped: true) { _ in
@@ -85,7 +90,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // 只有一行时垂直居中，跟原来单行状态栏的观感一致
                     topText.draw(at: NSPoint(x: x, y: max(0, (thickness - lineH) / 2)))
                 }
-                x += widths[index] + columnGap
+                x += widths[index]
+
+                if index < blocks.count - 1 {
+                    x += separatorPad
+                    NSColor.black.withAlphaComponent(0.45).setFill()
+                    NSRect(x: x, y: separatorInset,
+                           width: separatorWidth,
+                           height: thickness - separatorInset * 2).fill()
+                    x += separatorWidth + separatorPad
+                }
             }
             return true
         }
