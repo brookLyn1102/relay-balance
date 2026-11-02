@@ -22,6 +22,46 @@ let INTERVALS: [(Int, String)] = [
     (300, "5 分钟"), (600, "10 分钟"), (1800, "30 分钟"),
 ]
 
+// MARK: - 刷新间隔下拉
+
+/// 刷新间隔下拉。
+///
+/// 不用 `.pickerStyle(.menu)`：它背后是 NSPopUpButton，自带一块灰色胶囊底，
+/// 压在深色面板上很突兀，而且底色改不掉。这里换成 Menu + borderlessButton：
+/// 透明底、白字，右侧只留系统画的小箭头，和面板里其它文字齐平。
+/// （`.menuStyle(.button)` 也能做到，但要 macOS 13+，这个包最低支持 12。）
+struct IntervalMenu: View {
+    var value: Int
+    var size: CGFloat = 10
+    var onChange: (Int) -> Void
+
+    private var currentLabel: String {
+        INTERVALS.first { $0.0 == value }?.1 ?? "\(value) 秒"
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(INTERVALS, id: \.0) { item in
+                Button {
+                    onChange(item.0)
+                } label: {
+                    if item.0 == value {
+                        Label(item.1, systemImage: "checkmark")
+                    } else {
+                        Text(item.1)
+                    }
+                }
+            }
+        } label: {
+            Text(currentLabel)
+                .font(.system(size: size))
+                .foregroundColor(Palette.text)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+}
+
 // MARK: - 面板
 
 struct PanelView: View {
@@ -107,17 +147,8 @@ struct PanelView: View {
                     .buttonStyle(.plain)
                     .help(info.message)
                 }
-                Picker("", selection: Binding(
-                    get: { model.cfg.interval },
-                    set: { model.setInterval($0) })) {
-                    ForEach(INTERVALS, id: \.0) { item in
-                        Text(item.1).tag(item.0)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 96)
-                .disabled(model.nightIdle)
+                IntervalMenu(value: model.cfg.interval) { model.setInterval($0) }
+                    .disabled(model.nightIdle)
             }
             .padding(.top, 6)
         }

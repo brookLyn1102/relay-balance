@@ -78,16 +78,7 @@ struct SettingsView: View {
                     .frame(width: 70)
                     .textFieldStyle(.roundedBorder)
                 Text("刷新间隔").font(.system(size: 12))
-                Picker("", selection: Binding(
-                    get: { model.cfg.interval },
-                    set: { model.setInterval($0) })) {
-                    ForEach(INTERVALS, id: \.0) { item in
-                        Text(item.1).tag(item.0)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 100)
+                IntervalMenu(value: model.cfg.interval, size: 12) { model.setInterval($0) }
             }
 
             HStack(spacing: 10) {
