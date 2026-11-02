@@ -54,7 +54,7 @@ scripts/build-app.sh
 | 运行环境 | python3 + rumps + psutil + pillow | 无依赖，单个可执行文件 |
 | 菜单栏 | rumps 标题，不能单独上色 | NSStatusItem，可用 attributedTitle 上色 |
 | 面板 | 独立 tkinter 浮窗 | NSPopover，跟随菜单栏图标 |
-| 内存占用 | 两个进程（菜单栏 + 面板）约 80MB | 单进程，约 30MB |
+| 内存占用 | 两个进程（菜单栏 + 面板），RSS 约 80MB | 单进程；phys_footprint 约 13MB，RSS 约 43MB（差额是共享框架页） |
 
 Python 版保留在 `../mac/`，随时可以回退。
 

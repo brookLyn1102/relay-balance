@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    /// 首次点开时才创建，见 makePopover()
+    private var popover: NSPopover?
     private let model = Model()
     private var settingsWindow: NSWindow?
     private var usageWindow: NSWindow?
@@ -17,7 +18,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         }
 
-        setupPopover()
         model.onChange = { [weak self] in self?.updateTitle() }
         model.start()
         updateTitle()
@@ -262,13 +262,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 面板
 
-    private func setupPopover() {
+    /// 面板按需创建：NSHostingController 一建起来就会把 SwiftUI 运行时拉进来。
+    /// 实测省 0.7–1.3MB footprint（RSS 约 2.5MB），不多，但拿到手不费事。
+    private func makePopover() -> NSPopover {
         let pop = NSPopover()
         pop.behavior = .transient
         pop.animates = true
         let host = NSHostingController(rootView: PanelView(
             model: model,
-            onClose: { [weak self] in self?.popover.performClose(nil) },
+            onClose: { [weak self] in self?.popover?.performClose(nil) },
             onSettings: { [weak self] in self?.openSettings() },
             onUsage: { [weak self] in self?.openUsage() }
         ))
@@ -277,11 +279,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // vibrancy 下就是黑底黑字（完全看不见），TextField 则是刺眼的白底。
         host.view.appearance = NSAppearance(named: .darkAqua)
         pop.contentViewController = host
-        popover = pop
+        return pop
     }
 
     @objc private func togglePopover() {
         guard let button = statusItem.button else { return }
+        if popover == nil { popover = makePopover() }
+        guard let popover else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
@@ -291,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPanel() {
-        if !popover.isShown { togglePopover() }
+        if popover?.isShown != true { togglePopover() }
     }
 
     // MARK: 动作
@@ -354,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "设置"
             window.isReleasedWhenClosed = false
             window.level = .floating
+            window.delegate = self
             window.contentView = NSHostingView(rootView: SettingsView(
                 model: model,
                 onClose: { [weak window] in window?.close() }
@@ -363,7 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
             settingsWindow = window
         }
-        popover.performClose(nil)
+        popover?.performClose(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -378,6 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "用量统计"
             window.isReleasedWhenClosed = false
             window.level = .floating
+            window.delegate = self
             window.contentView = NSHostingView(rootView: UsageView(
                 onClose: { [weak window] in window?.close() }
             ))
@@ -385,9 +391,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
             usageWindow = window
         }
-        popover.performClose(nil)
+        popover?.performClose(nil)
         NSApp.activate(ignoringOtherApps: true)
         usageWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// 关掉的窗口顺手把内容视图丢掉。
+    ///
+    /// 窗口是 `isReleasedWhenClosed = false` 复用的，NSHostingView 会一直跟着窗口
+    /// 活着。实测释放后只拿回约 0.4MB——大头是 SwiftUI 一次性初始化的共享开销，
+    /// 那部分放不掉。留着这个是因为顺带解决另一件事：下次打开会按当前配置重建，
+    /// 不会带上上次没保存的编辑。
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        if window === settingsWindow {
+            settingsWindow = nil
+        } else if window === usageWindow {
+            usageWindow = nil
+        } else {
+            return
+        }
+        // 关闭过程中改 contentView 会打断 AppKit 自己的收尾，挪到下一个 runloop
+        DispatchQueue.main.async { window.contentView = nil }
     }
 }
 
