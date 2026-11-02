@@ -41,15 +41,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// 不能用 title 拼换行——NSStatusBarButton 的 cell 是单行的，换行会被裁。
     /// 菜单栏高度是 NSStatusBar.system.thickness（22pt），9pt 字一行占 11pt，
-    /// 两行正好 22pt；11pt 要 26pt 会露出半行。所以数字一律 9pt，
+    /// 两行正好 22pt；11pt 要 26pt 会露出半行。所以两行组的数字一律 9pt，
     /// MEM / tok 这类说明性小字再降到 7.5pt，既省高度又有层次。
-    /// 画成 template 图后，深浅色菜单栏下会自动反色。
+    /// 只有一行的组没这层限制，放大到 12pt（今日 token 为 0 时余额就是这样，
+    /// 否则它比旁边两行的组又小又空）。画成 template 图后深浅色菜单栏自动反色。
     private func statusImage(_ blocks: [StatusBlock]) -> NSImage {
         let mainFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
         let capFont = NSFont.monospacedDigitSystemFont(ofSize: 7.5, weight: .medium)
+        // 单行组专用：22pt 高度放一行 12pt 绰绰有余（行高约 15pt），
+        // 12pt 的视觉重量大致相当于两行 9pt + 7.5pt 的合计，不会压过其它组
+        let soloFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         let thickness = NSStatusBar.system.thickness
         let lineH = ceil(mainFont.ascender - mainFont.descender + mainFont.leading)
         let capH = ceil(capFont.ascender - capFont.descender + capFont.leading)
+        let soloH = ceil(soloFont.ascender - soloFont.descender + soloFont.leading)
         // 组间竖线：0.5pt 在 2x 屏上正好 1 个像素，比 1pt 细腻；
         // 用半透明黑，template 图会按 alpha 反色，深色菜单栏下就是一条淡白线。
         let separatorWidth: CGFloat = 0.5
@@ -65,11 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
         }
 
-        // 每组宽度取上下两行里更宽的那个，保证块内左对齐、块间不互相挤
+        // 每组宽度取上下两行里更宽的那个，保证块内左对齐、块间不互相挤；
+        // 单行组按放大后的字号量，否则宽度会算窄、右边被切
         let widths: [CGFloat] = blocks.map { block in
-            let topWidth = width(of: block.top, mainFont)
-            guard let bottom = block.bottom else { return topWidth }
-            return max(topWidth, width(of: bottom, font(for: block)))
+            guard let bottom = block.bottom else { return width(of: block.top, soloFont) }
+            return max(width(of: block.top, mainFont), width(of: bottom, font(for: block)))
         }
         let separatorCount = CGFloat(max(0, blocks.count - 1))
         let totalWidth = padX * 2 + widths.reduce(0, +)
@@ -79,8 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let image = NSImage(size: NSSize(width: totalWidth, height: thickness), flipped: true) { _ in
             var x = padX
             for (index, block) in blocks.enumerated() {
-                let topText = NSAttributedString(string: block.top, attributes: [.font: mainFont])
                 if let bottom = block.bottom {
+                    let topText = NSAttributedString(string: block.top, attributes: [.font: mainFont])
                     let bottomFont = font(for: block)
                     let bottomText = NSAttributedString(string: bottom, attributes: [.font: bottomFont])
                     topText.draw(at: NSPoint(x: x, y: stackTop))
@@ -88,8 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let offset = block.bottomSmall ? (lineH - capH) / 2 : 0
                     bottomText.draw(at: NSPoint(x: x, y: stackTop + lineH + offset))
                 } else {
-                    // 只有一行时垂直居中，跟原来单行状态栏的观感一致
-                    topText.draw(at: NSPoint(x: x, y: max(0, (thickness - lineH) / 2)))
+                    // 只有一行时用放大的字号，并在 22pt 里垂直居中
+                    let soloText = NSAttributedString(string: block.top, attributes: [.font: soloFont])
+                    soloText.draw(at: NSPoint(x: x, y: max(0, (thickness - soloH) / 2)))
                 }
                 x += widths[index]
 
