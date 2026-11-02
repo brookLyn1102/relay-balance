@@ -266,7 +266,11 @@ struct SettingsView: View {
             model.cfg.weekQuota = q
         }
         model.save()
-        message = "已保存"
         model.refresh()
+        // 账户 / 额度改完通常就是「保存完就走」，留一个空窗在这儿反而多一步
+        onClose()
+        // 设置窗是复用同一个实例（isReleasedWhenClosed = false），
+        // 不清掉的话下次打开还挂着上次的提示
+        message = ""
     }
 }
