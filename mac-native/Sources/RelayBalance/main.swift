@@ -119,7 +119,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var blocks: [StatusBlock] = []
         var tooltip: [String] = []
 
-        // 顺序：内存 · CPU 温度 · 上传下载 · 余额（今日 token 叠在余额下面）
+        // 顺序：上传下载 · 内存 · CPU 温度 · 余额（今日 token 叠在余额下面）
+        if model.cfg.menuSpeed {
+            let up = fmtSpeedShort(model.up)
+            let down = fmtSpeedShort(model.down)
+            blocks.append(StatusBlock(top: "↑" + up, bottom: "↓" + down))
+            tooltip.append("↑\(up) ↓\(down)")
+        }
+
         if model.cfg.menuMem, let m = model.mem {
             blocks.append(StatusBlock(
                 top: String(format: "%.0f%%", m.usedPct),
@@ -133,13 +140,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.cfg.menuTemp, let temp = model.cpuTemp {
             blocks.append(StatusBlock(top: fmtTemp(temp), bottom: "CPU", bottomSmall: true))
             tooltip.append(String(format: "CPU %.1f°C", temp))
-        }
-
-        if model.cfg.menuSpeed {
-            let up = fmtSpeedShort(model.up)
-            let down = fmtSpeedShort(model.down)
-            blocks.append(StatusBlock(top: "↑" + up, bottom: "↓" + down))
-            tooltip.append("↑\(up) ↓\(down)")
         }
 
         // 今天还没用量（total == 0）时不占位，等有 token 了自动出现；
