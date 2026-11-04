@@ -152,7 +152,12 @@ final class Model: ObservableObject {
         guard cfg.menuBalance else { return }
         lastErrorAt = nil
         balance = data
-        let w = weekSplit(cfg, pool: data.left)
+        var w = weekSplit(cfg, pool: data.left)
+        // 周一的基准在的话，用真实的本周花费替掉「周额度 − 池子」的估算
+        if let real = DailyStore.usedThisWeek(data.used) {
+            w.spent = real
+            w.pct = w.quota > 0 ? real / w.quota * 100 : 0
+        }
         week = w
         cfg.weekKey = weekKey()
         lastAt = Date()

@@ -84,4 +84,21 @@ enum DailyStore {
     static func base(of date: String? = nil) -> Double {
         load().days[date ?? todayKey()] ?? 0
     }
+
+    /// 本周一（ISO 周，周一算第一天）的日期
+    static func weekStart(_ now: Date = Date()) -> String {
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = .current
+        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+        if let monday = cal.date(from: comps) { return df.string(from: monday) }
+        return todayKey(now)
+    }
+
+    /// 本周一 0 点以来花了多少。
+    /// 周一的基准本来就在 days 里（那天的 0 点快照），不用另存；
+    /// 周一没记录就返回 nil，调用方退回「周额度 − 池子」的估算。
+    static func usedThisWeek(_ used: Double, now: Date = Date()) -> Double? {
+        guard let base = load().days[weekStart(now)] else { return nil }
+        return max(0, used - base)
+    }
 }

@@ -9,6 +9,9 @@
 
 今日用量 = 当前已用 − 今日基准。中途充值不影响：充值是往总额度里加钱，
 `used` 只增不减；万一被后台重置成更小值，就按 0 算，不显示负数。
+
+周用量不用另存：本周一的日期在 days 里就有，那天的基准就是周一 0 点的
+已用额度，减一下就是本周花费。周一没记录就返回 None，让调用方退回估算。
 """
 import datetime
 import json
@@ -102,6 +105,29 @@ def base_of(date=None):
     """某天的基准；不给日期就是今天。"""
     date = date or _date(time.time())
     return float(_load()["days"].get(date) or 0.0)
+
+
+def week_start(now=None):
+    """本周一（ISO 周，周一算第一天）的日期。"""
+    ts = time.time() if now is None else float(now)
+    d = datetime.date.fromtimestamp(ts)
+    return (d - datetime.timedelta(days=d.weekday())).isoformat()
+
+
+def used_this_week(used, now=None):
+    """本周一 0 点以来花了多少。
+
+    周一的基准就是那天 0 点的「已用」，本来就在 days 里，不用另存一份。
+    本周一没记录（当时没开机 / 这周才装上）就返回 None，调用方退回老算法。
+    """
+    try:
+        used = float(used)
+    except (TypeError, ValueError):
+        return None
+    base = _load()["days"].get(week_start(now))
+    if base is None:
+        return None
+    return max(0.0, used - float(base))
 
 
 def history():

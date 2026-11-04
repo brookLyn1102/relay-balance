@@ -16,7 +16,7 @@ except Exception:                                    # 没装 psutil 时网速�
     psutil = None
 
 APP_NAME = "中转管家"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 PROVIDERS_PATH = os.path.expanduser("~/.config/magpie/providers.json")

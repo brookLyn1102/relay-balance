@@ -999,7 +999,15 @@ class Widget:
         self.data = data
         quota = float(self.cfg.get("week_quota") or 100.0)
         pool = data["left"]                       # 总池剩余＝本周还能花的钱
-        spent = max(0.0, quota - pool)            # 本周已用＝周额度 − 总池剩余
+        # 先按老算法估算，周一的基准在的话再换成真实值
+        spent = max(0.0, quota - pool)
+        try:
+            real_week = rb_daily.used_this_week(data["used"])
+        except Exception as e:
+            real_week = None
+            applog.log("本周花费算不出来:", e)
+        if real_week is not None:
+            spent = real_week
         pct = (spent / quota * 100) if quota else 0.0
         self.cfg["week_key"] = week_key()         # 只是让跨周检查不误触发
         week_left = quota - spent
@@ -1264,10 +1272,16 @@ def main():
         quota = float(cfg.get("week_quota") or 100.0)
         pool = data["left"]
         spent = max(0.0, quota - pool)
+        try:
+            real_week = rb_daily.used_this_week(data["used"])
+        except Exception:
+            real_week = None
         pct = (spent / quota * 100) if quota else 0.0
         print(f"来源 {data.get('source')}")
         print(f"本周 {week_key()} 已用 ${spent:,.2f} / ${quota:,.0f}（{pct:.1f}%），"
-              f"剩 ${pool:,.2f}")
+              f"剩 ${pool:,.2f}"
+              + (f"　记录值 ${real_week:,.2f}" if real_week is not None
+                 else "　（周一没基准，按周额度估算）"))
         print(f"总池 ${data['total']:,.2f} · 累计已用 ${data['used']:,.2f} · "
               f"剩 ${data['left']:,.2f}")
         try:
