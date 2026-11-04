@@ -63,7 +63,7 @@ class UsageWindow(tk.Toplevel):
 
         foot = tk.Frame(outer, bg=BG)
         foot.pack(fill="x", padx=14, pady=(14, 12))
-        tk.Label(foot, text="数字为输入+输出；缓存读单独列出，两边同一请求只计一次",
+        tk.Label(foot, text="数字为输入+输出+缓存读；缓存单列时另算，同一请求只计一次",
                  bg=BG, fg=MUTED, font=(self.f, 7), anchor="w",
                  justify="left", wraplength=self.W - 32).pack(side="left")
 
@@ -122,7 +122,7 @@ class UsageWindow(tk.Toplevel):
                             (self.c_month, usage_stats.month_dates())):
             agg = usage_stats.totals(self.data, dates)
             val, sub = card
-            val.config(text=usage_stats.fmt_tokens(agg["in"] + agg["out"]))
+            val.config(text=usage_stats.fmt_tokens(usage_stats.tok_total(agg)))
             sub.config(text=f"{agg['req']:,} 次" if agg["req"] else "无记录")
 
         month = usage_stats.totals(self.data, usage_stats.month_dates())
@@ -143,7 +143,7 @@ class UsageWindow(tk.Toplevel):
         vals = []
         for d in dates:
             row = self.data.get(d) or {}
-            vals.append(row.get("in", 0) + row.get("out", 0))
+            vals.append(usage_stats.tok_total(row))
         peak = max(vals + [1])
         if not any(vals):
             self.hint(self.days_box, "近 7 天没有记录")
@@ -159,24 +159,25 @@ class UsageWindow(tk.Toplevel):
         if not months:
             self.hint(self.month_box, "没有历史记录")
             return
-        peak = max([v["in"] + v["out"] for _k, v in months] + [1])
+        peak = max([usage_stats.tok_total(v) for _k, v in months] + [1])
         for key, agg in months:
-            v = agg["in"] + agg["out"]
+            v = usage_stats.tok_total(agg)
             self.bar_row(self.month_box, key, v, agg["req"], v / peak, label_width=8, color=GREEN)
 
     def fill_models(self, month):
         for w in self.model_box.winfo_children():
             w.destroy()
         models = sorted(month["models"].items(),
-                        key=lambda x: -(x[1]["in"] + x[1]["out"]))[:4]
+                        key=lambda x: -usage_stats.tok_total(x[1]))[:4]
         if not models:
             self.hint(self.model_box, "本月没有记录")
             return
-        peak = max([v["in"] + v["out"] for _k, v in models] + [1])
+        peak = max([usage_stats.tok_total(v) for _k, v in models] + [1])
         for name, v in models:
             short = name if len(name) <= 16 else name[:15] + "…"
-            self.bar_row(self.model_box, short, v["in"] + v["out"], v["req"],
-                         (v["in"] + v["out"]) / peak, label_width=16, color=AMBER)
+            total = usage_stats.tok_total(v)
+            self.bar_row(self.model_box, short, total, v["req"],
+                         total / peak, label_width=16, color=AMBER)
 
     def hint(self, parent, text):
         tk.Label(parent, text=text, bg=BG, fg=MUTED, font=(self.f, 8),

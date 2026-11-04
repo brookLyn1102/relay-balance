@@ -9,7 +9,8 @@ struct ModelAgg {
     var tout = 0
     var cache = 0
 
-    var total: Int { tin + tout }
+    // 和外面面板口径一致：缓存读也算 token（它常占九成）
+    var total: Int { tin + tout + cache }
 }
 
 struct DayAgg {
@@ -20,7 +21,8 @@ struct DayAgg {
     var src = ""
     var models: [String: ModelAgg] = [:]
 
-    var total: Int { tin + tout }
+    // 和外面面板口径一致：缓存读也算 token（它常占九成）
+    var total: Int { tin + tout + cache }
 
     mutating func add(model: String?, tin: Int, tout: Int, cache: Int) {
         let name = (model?.isEmpty ?? true) ? "unknown" : model!

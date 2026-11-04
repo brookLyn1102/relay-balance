@@ -59,6 +59,18 @@ def fmt_tokens(n):
     return f"{n:,}"
 
 
+def tok_total(agg, with_cache=True):
+    """总量口径：输入 + 输出 + 缓存读。
+
+    缓存读通常占九成（一次长上下文请求能命中几十万），外面那套面板
+    （喜鹊网页、CC Switch）都把它算进 token 总数，这里跟着算才对得上。
+    """
+    if not agg:
+        return 0
+    n = _num(agg.get("in")) + _num(agg.get("out"))
+    return n + _num(agg.get("cache")) if with_cache else n
+
+
 def _blank(src=""):
     return {"req": 0, "in": 0, "out": 0, "cache": 0, "models": {}, "src": src}
 
@@ -367,14 +379,14 @@ if __name__ == "__main__":
     data = collect()
     print(f"读耗时 {time.time() - t0:.2f}s，{len(data)} 天有数据")
     td = totals(data, month_dates())
-    print(f"本月 {fmt_tokens(td['in'] + td['out'])} tok ({td['req']} 次) "
+    print(f"本月 {fmt_tokens(tok_total(td))} tok ({td['req']} 次) "
           f"入 {fmt_tokens(td['in'])} 出 {fmt_tokens(td['out'])} 缓存 {fmt_tokens(td['cache'])}")
     for d in recent_dates(7):
         r = data.get(d)
-        print(f"  {d}  " + (f"{fmt_tokens(r['in'] + r['out']):>8s}  {r['req']:>5d} 次  [{r['src']}]" if r else "—"))
+        print(f"  {d}  " + (f"{fmt_tokens(tok_total(r)):>8s}  {r['req']:>5d} 次  [{r['src']}]" if r else "—"))
     print("\n按月:")
     for k, v in list(by_month(data).items())[:5]:
-        print(f"  {k}  {fmt_tokens(v['in'] + v['out']):>8s}  {v['req']:>6d} 次")
+        print(f"  {k}  {fmt_tokens(tok_total(v)):>8s}  {v['req']:>6d} 次")
     print("\n本月按模型:")
-    for m, v in sorted(td["models"].items(), key=lambda x: -(x[1]["in"] + x[1]["out"]))[:5]:
-        print(f"  {m:28s} {fmt_tokens(v['in'] + v['out']):>8s}  {v['req']:>5d} 次")
+    for m, v in sorted(td["models"].items(), key=lambda x: -tok_total(x[1]))[:5]:
+        print(f"  {m:28s} {fmt_tokens(tok_total(v)):>8s}  {v['req']:>5d} 次")

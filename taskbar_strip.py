@@ -12,10 +12,13 @@ from ctypes import wintypes
 import applog
 
 try:
-    from usage_stats import fmt_tokens as _fmt_tok
+    from usage_stats import fmt_tokens as _fmt_tok, tok_total as _tok_total
 except Exception:                                     # 单独跑时也不能崩
     def _fmt_tok(n):
         return str(int(n or 0))
+
+    def _tok_total(agg):
+        return (agg.get("in") or 0) + (agg.get("out") or 0) + (agg.get("cache") or 0)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -610,7 +613,7 @@ class TaskbarStrip:
 
     def _tok_text(self):
         t = getattr(self.app, "today_tok", None) or {}
-        total = (t.get("in") or 0) + (t.get("out") or 0)
+        total = _tok_total(t)
         return (_fmt_tok(total) + " tok") if total else ""
 
     def _pct_color(self, pct):

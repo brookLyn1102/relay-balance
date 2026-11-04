@@ -24,6 +24,7 @@ import threading
 import time
 
 import tkinter as tk
+from tkinter import font as tkfont
 
 import pystray
 
@@ -346,12 +347,27 @@ class Widget:
 
     def render_tok(self):
         t = getattr(self, "today_tok", None) or {}
-        total = (t.get("in", 0) or 0) + (t.get("out", 0) or 0)
-        if total:
-            self.lb_tok.config(
-                text=f"今日 {usage_stats.fmt_tokens(total)} tok · {t.get('req', 0):,} 次")
-        else:
+        total = usage_stats.tok_total(t)
+        if not total:
             self.lb_tok.config(text="今日 — tok")
+            return
+        text = f"今日 {usage_stats.fmt_tokens(total)} tok · {t.get('req', 0):,} 次"
+        cache = int(t.get("cache", 0) or 0)
+        if cache:
+            full = text + f" · 缓存 {usage_stats.fmt_tokens(cache)}"
+            if self._tok_fits(full):     # 数字长到放不下就退回短的一行，别被窗口裁掉
+                text = full
+        self.lb_tok.config(text=text)
+
+    def _tok_fits(self, text):
+        try:
+            f = getattr(self, "_tok_font", None)
+            if f is None:
+                f = tkfont.Font(root=self.root, family=self.f_zh, size=8)
+                self._tok_font = f
+            return f.measure(text) <= self.w - 34
+        except Exception:
+            return False
 
     def render_mem(self):
         gb, pct = mem_status()
@@ -384,7 +400,7 @@ class Widget:
         t = getattr(self, "today_tok", None)
         if not isinstance(t, dict):
             return None
-        return int(t.get("in", 0) or 0) + int(t.get("out", 0) or 0)
+        return usage_stats.tok_total(t)
 
     def auto_refresh(self):
         """有 token 变动才查余额，间隔仍是 interval 秒。
