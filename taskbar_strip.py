@@ -310,6 +310,7 @@ class TaskbarStrip:
         self._sep_w = 0
         self._sep_gap = 0
         self._rgap = 0
+        self._day_flag = None         # 上一轮有没有「今日花费」，变了要重算宽度
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
         self._thread.start()
@@ -486,11 +487,16 @@ class TaskbarStrip:
                 return sz.cx
             up_w = width("↑ 999.9 MB/s")
             dn_w = width("↓ 999.9 MB/s")
-            bal_w = width("$9,999.99")
+            # 样例按常见位数定，再跟当前实际文本取大的：余额涨到五位数
+            # （$12,345.67）时样例不够宽，不补就会被右边界裁掉
+            bal_w = width("$9,999.99 · $9,999.99" if self._has_day()
+                          else "$9,999.99")
+            bal_w = max(bal_w, width(self._bal_text()))
             tok_w = width("999.9M tok")
             mid_w = max(width("100%"), width("MEM"))
         finally:
             user32.ReleaseDC(self.hwnd, hdc)
+        self._bal_w = bal_w
 
         self.stack = bool(self.cfg.get("bar_stack", True))
         self.pad = max(8, int(self._h * 0.22))
@@ -616,6 +622,37 @@ class TaskbarStrip:
         total = _tok_total(t)
         return (_fmt_tok(total) + " tok") if total else ""
 
+    def _has_day(self):
+        """今日花费算出来没有（0 也算有）。"""
+        return getattr(self.app, "day_spent", None) is not None
+
+    def _bal_text(self):
+        """「$139.54 · $2.43」——余额后面跟一个中间点，再跟今日已用。"""
+        w = getattr(self.app, "week", None)
+        if not w:
+            return "$—"
+        text = self._fm(w.get("left"), False)
+        spent = getattr(self.app, "day_spent", None)
+        if spent is not None:
+            text += " · " + self._fm(spent, False)
+        return text
+
+    def _bal_need_more(self):
+        """金额位数变长（$999 → $12,345）时当前宽度不够了，得重测。"""
+        if self.vertical or not self._font:
+            return False
+        hdc = self._hdc()
+        try:
+            gdi32.SelectObject(hdc, self._font)
+            sz = SIZE()
+            text = self._bal_text()
+            gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(sz))
+            return sz.cx > getattr(self, "_bal_w", 0)
+        except Exception:
+            return False
+        finally:
+            user32.ReleaseDC(self.hwnd, hdc)
+
     def _pct_color(self, pct):
         """和面板进度条同一套阈值：<80 绿、<95 琥珀、≥95 红。"""
         if pct >= 95:
@@ -657,7 +694,7 @@ class TaskbarStrip:
         if self.cfg.get("bar_show_balance", True):
             w = getattr(self.app, "week", None)
             if w:
-                right.append((self._fm(w.get("left"), False),
+                right.append((self._bal_text(),
                               self._pct_color(w.get("pct") or 0)))
             else:
                 right.append(("$—", self.c_dim))
@@ -808,6 +845,13 @@ class TaskbarStrip:
                     else (tb_rc.bottom - tb_rc.top)
                 if edge != self.edge or thick != getattr(self, "_thick", None):
                     _log("layout changed", self.edge, self._thick, "->", edge, thick)
+                    self._need_measure = True
+                # 今日花费从无到有（第一次算出来）时金额会长一截，跟着重测
+                has_day = self._has_day()
+                if has_day != self._day_flag:
+                    self._day_flag = has_day
+                    self._need_measure = True
+                if not getattr(self, "_need_measure", False) and self._bal_need_more():
                     self._need_measure = True
                 if getattr(self, "_need_measure", False):
                     self._need_measure = False
