@@ -141,6 +141,8 @@ Win11 的任务栏是 XAML 合成层。最初把无边框 Tk 窗口贴在任务�
 
 token 用量只读本地日志（magpie 的 `~/.config/magpie/routing/*.jsonl` + CC Switch 的 sqlite），5 秒一轮必须做增量：按字节偏移只消费新增的行，整行没写完就留到下一轮。
 
+magpie 每天上午会把前一天的日志压成 `YYYY-MM-DD.jsonl.gz`，历史日期基本都是压缩包，所以两个读取器都得同时认 `.jsonl` 和 `.jsonl.gz`（Windows 用 `gzip` 模块，mac 走 `/usr/bin/gzip -dc`）。只认 `.jsonl` 的话「本周 / 本月」会缺掉前几天，看起来跟「今日」一模一样。
+
 容错这块有三处坑，都做了兜底：
 
 - `config.json` 用临时文件 + `os.replace` 原子替换，写一半断电也不会只剩半个 JSON

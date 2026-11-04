@@ -10,6 +10,7 @@ magpie 优先（它是网关，数字最接近真实计费），CC Switch 只补
 
 import os
 import glob
+import gzip
 import json
 import time
 import datetime
@@ -37,7 +38,8 @@ def has_source():
     ok = False
     try:
         if os.path.isdir(MAGPIE_DIR):
-            ok = any(n.endswith(".jsonl") for n in os.listdir(MAGPIE_DIR))
+            ok = any(n.endswith((".jsonl", ".jsonl.gz"))
+                     for n in os.listdir(MAGPIE_DIR))
     except Exception:
         ok = False
     if not ok:
@@ -94,10 +96,16 @@ def _num(v):
 
 
 def _parse_magpie_file(path):
-    """单个 jsonl 文件 -> 当天聚合。坏行直接跳过。"""
+    """单个 jsonl（或 .jsonl.gz）文件 -> 当天聚合。坏行直接跳过。
+
+    magpie 每天上午 10 点左右把前一天的日志压成 .jsonl.gz，所以历史日期
+    几乎都是压缩包；只认 .jsonl 会让「本周/本月」缺掉前几天，看起来和
+    今日一模一样。
+    """
     agg = _blank("magpie")
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -127,16 +135,26 @@ def _parse_magpie_file(path):
     return agg
 
 
+def _date_of(name):
+    """2026-11-03.jsonl / 2026-11-03.jsonl.gz -> 2026-11-03"""
+    for suffix in (".jsonl.gz", ".jsonl"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return ""
+
+
 def scan_magpie(days=40):
     """{date: agg}，只返回有数据的日期。"""
     out = {}
     try:
-        files = sorted(glob.glob(os.path.join(MAGPIE_DIR, "*.jsonl")))
+        files = [p for p in glob.glob(os.path.join(MAGPIE_DIR, "*.jsonl*"))
+                 if _date_of(os.path.basename(p))]
+        # 按日期排，别按文件名：字符串序里 "11-04.jsonl" 排在 "11-03.jsonl.gz" 前面
+        files.sort(key=lambda p: _date_of(os.path.basename(p)))
     except Exception:
         return out
     for path in files[-days:]:
-        name = os.path.basename(path)
-        date = name[:-6] if name.endswith(".jsonl") else name
+        date = _date_of(os.path.basename(path))
         try:
             st = os.stat(path)
         except Exception:
@@ -361,6 +379,27 @@ def today_live():
     if st["req"]:
         return {"req": st["req"], "in": st["in"], "out": st["out"],
                 "cache": st["cache"], "src": "magpie"}
+
+    # 当天的日志已经被压走（手动压缩、或者跨天后才开机）：直接读压缩包
+    gz = path + ".gz"
+    if os.path.exists(gz):
+        try:
+            st_info = os.stat(gz)
+            key = (int(st_info.st_mtime), st_info.st_size)
+        except OSError:
+            key = None
+        gz_agg = None
+        if key:
+            cached = _FILE_CACHE.get(gz)
+            if cached and cached[0] == key:
+                gz_agg = cached[1]
+        if gz_agg is None:
+            gz_agg = _parse_magpie_file(gz)
+            if key:
+                _FILE_CACHE[gz] = (key, gz_agg)      # 压缩包不会变，解一次就够
+        if gz_agg["req"]:
+            return {"req": gz_agg["req"], "in": gz_agg["in"], "out": gz_agg["out"],
+                    "cache": gz_agg["cache"], "src": "magpie"}
 
     now = time.time()
     if _CC_TODAY["val"] is None or now - _CC_TODAY["ts"] > 60:

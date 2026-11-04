@@ -125,7 +125,7 @@ final class UsageReader {
         if let c = sourceCache, Date().timeIntervalSince(c.at) < 300 { return c.ok }
         var ok = false
         if let items = try? FileManager.default.contentsOfDirectory(atPath: Paths.magpieRouting.path) {
-            ok = items.contains { $0.hasSuffix(".jsonl") }
+            ok = items.contains { $0.hasSuffix(".jsonl") || $0.hasSuffix(".jsonl.gz") }
         }
         if !ok {
             ok = FileManager.default.fileExists(atPath: Paths.ccswitchDB.path)
@@ -136,10 +136,35 @@ final class UsageReader {
 
     // ---- magpie
 
+    /// magpie 每天上午把前一天的日志压成 .jsonl.gz，历史日期基本都是压缩包
+    private func magpieText(_ url: URL) -> String? {
+        if !url.path.hasSuffix(".gz") {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        p.arguments = ["-dc", url.path]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// "2026-11-03.jsonl" / "2026-11-03.jsonl.gz" -> "2026-11-03"
+    private func dateOf(_ name: String) -> String {
+        for suffix in [".jsonl.gz", ".jsonl"] where name.hasSuffix(suffix) {
+            return String(name.dropLast(suffix.count))
+        }
+        return ""
+    }
+
     private func parseMagpie(_ url: URL) -> DayAgg {
         var agg = DayAgg()
         agg.src = "magpie"
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return agg }
+        guard let text = magpieText(url) else { return agg }
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let data = line.data(using: .utf8),
                   let raw = try? JSONSerialization.jsonObject(with: data),
@@ -169,12 +194,12 @@ final class UsageReader {
                                                       options: [.skipsHiddenFiles]) else {
             return out
         }
-        let jsonl = files.filter { $0.pathExtension == "jsonl" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let jsonl = files.filter { dateOf($0.lastPathComponent) != "" }
+            .sorted { dateOf($0.lastPathComponent) < dateOf($1.lastPathComponent) }
             .suffix(days)
         for url in jsonl {
             let name = url.lastPathComponent
-            let date = name.hasSuffix(".jsonl") ? String(name.dropLast(6)) : name
+            let date = dateOf(name)
             let attrs = try? fm.attributesOfItem(atPath: url.path)
             let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
             let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -314,6 +339,13 @@ final class UsageReader {
         consumeNew(url)
 
         if let agg = tail[url.path], agg.req > 0 { return agg }
+
+        // 当天的日志已被压走（跨天后才开机）：直接读压缩包
+        let gz = Paths.magpieRouting.appendingPathComponent("\(date).jsonl.gz")
+        if FileManager.default.fileExists(atPath: gz.path) {
+            let agg = parseMagpie(gz)
+            if agg.req > 0 { return agg }
+        }
 
         let now = Date().timeIntervalSince1970
         if ccToday == nil || now - ccToday!.t > 60 {
