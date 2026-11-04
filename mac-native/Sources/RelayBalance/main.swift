@@ -151,6 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let money = model.balance.map { fmtMoney($0.left) } ?? "—"
             blocks.append(StatusBlock(top: money, bottom: tokenText, bottomSmall: true))
             tooltip.append("余额 " + money)
+            if let day = model.daySpent {
+                tooltip.append(String(format: "今日花费 $%.2f", day))
+            }
         } else if let tokenText = tokenText {
             // 余额关了但 token 还开着，单独占一组，否则会被一起吞掉
             blocks.append(StatusBlock(top: tokenText, bottom: nil))

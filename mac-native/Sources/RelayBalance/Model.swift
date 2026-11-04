@@ -5,6 +5,8 @@ final class Model: ObservableObject {
     @Published var cfg: Config
     @Published var balance: Balance?
     @Published var week: WeekStat?
+    /// 今天花掉的额度（当前已用 − 今日 0 点基准）
+    @Published var daySpent: Double?
     @Published var todayTok: DayAgg?
     @Published var mem: MemInfo?
     @Published var cpuTemp: Double?
@@ -27,6 +29,7 @@ final class Model: ObservableObject {
     private var tickCount = 0
     private var tokMark: Int?
     private var lastErrorAt: Date?
+    private var dayKey = ""
 
     /// 标题 / 菜单需要跟着刷新时回调
     var onChange: (() -> Void)?
@@ -63,6 +66,19 @@ final class Model: ObservableObject {
     // MARK: 每秒
 
     private func onSecond() {
+        // 跨天：0 点（或休眠醒来）补一次查询，把当天的「已用」基准落下
+        let key = DailyStore.todayKey()
+        if dayKey.isEmpty {
+            dayKey = key
+        } else if dayKey != key {
+            dayKey = key
+            daySpent = nil
+            if cfg.menuBalance {
+                Log.write("0 点快照：记录今日已用基准")
+                refresh()
+            }
+        }
+
         // 网速也按开关走：菜单栏和面板都不显示时，没必要每秒去读接口计数器
         if cfg.menuSpeed || cfg.netPanel {
             net.sample()
@@ -140,6 +156,7 @@ final class Model: ObservableObject {
         week = w
         cfg.weekKey = weekKey()
         lastAt = Date()
+        daySpent = DailyStore.usedToday(data.used)
         tokMark = todayTok?.total ?? UsageReader.shared.todayLive().total
         statusText = clockText(data.at)
         statusKind = w.pct >= 95 ? .bad : (w.pct >= 80 ? .warn : .good)
@@ -286,6 +303,7 @@ final class Model: ObservableObject {
         } else {
             balance = nil
             week = nil
+            daySpent = nil
             busy = false
             statusText = "余额查询已关闭"
             statusKind = .muted
@@ -350,6 +368,13 @@ final class Model: ObservableObject {
         case .warn: return Color(hex: "#f5b544")
         case .bad: return Color(hex: "#f87171")
         }
+    }
+
+    /// 「本周 $38.13 / $100 · 今日 $12.08」
+    func weekText(_ w: WeekStat) -> String {
+        let head = String(format: "本周 $%.2f / $%.0f", w.spent, w.quota)
+        guard let d = daySpent else { return head }
+        return head + String(format: " · 今日 $%.2f", d)
     }
 
     var todayText: String? {

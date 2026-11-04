@@ -104,7 +104,7 @@ struct PanelView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 if model.cfg.menuBalance, let w = model.week {
-                    Text(String(format: "本周 $%.2f / $%.0f", w.spent, w.quota))
+                    Text(model.weekText(w))
                 }
                 if model.cfg.menuBalance, let b = model.balance {
                     Text(String(format: "总额度 $%.2f   ·   已用 $%.2f", b.total, b.used))

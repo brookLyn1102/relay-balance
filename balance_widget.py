@@ -15,6 +15,7 @@
     rb_usage      用量统计窗口
 """
 import ctypes
+import datetime
 import os
 import queue
 import re
@@ -39,6 +40,7 @@ except Exception:                                    # 新条不可用时回退 
     TaskbarStrip = None
 
 import applog
+import rb_daily
 import usage_stats
 import updater
 from rb_core import (
@@ -70,6 +72,7 @@ class Widget:
         self.strip = None
         self.settings = None
         self.week = None
+        self.day_spent = None       # 今天花掉的额度（当前已用 − 今日 0 点基准）
         self.night_idle = False
         self.update_info = None      # 最近一次检查更新的结果
         self.updating = False        # 正在查 / 正在拉
@@ -118,6 +121,7 @@ class Widget:
         self.root.after(900, self.tick_net)
         self.root.after(3000, self.watch_strip)
         self.root.after(8000, self.auto_check)
+        self.schedule_midnight()
 
     def round_corners(self):
         round_window(self.root)
@@ -355,17 +359,27 @@ class Widget:
         cache = int(t.get("cache", 0) or 0)
         if cache:
             full = text + f" · 缓存 {usage_stats.fmt_tokens(cache)}"
-            if self._tok_fits(full):     # 数字长到放不下就退回短的一行，别被窗口裁掉
+            if self._fits(full):        # 数字长到放不下就退回短的一行，别被窗口裁掉
                 text = full
         self.lb_tok.config(text=text)
 
-    def _tok_fits(self, text):
+    def detail_text(self, spent, quota):
+        """「本周 $x / $100」，放得下就把今日花费接在后面。"""
+        text = f"本周 ${spent:,.2f} / ${quota:,.0f}"
+        if self.day_spent is not None:
+            with_day = text + f" · 今日 ${self.day_spent:,.2f}"
+            if self._fits(with_day):
+                text = with_day
+        return text
+
+    def _fits(self, text, pad=34):
+        """这一行字在面板里放不放得下。放不下就少写一段，别让标签被窗口切掉。"""
         try:
-            f = getattr(self, "_tok_font", None)
+            f = getattr(self, "_fit_font", None)
             if f is None:
                 f = tkfont.Font(root=self.root, family=self.f_zh, size=8)
-                self._tok_font = f
-            return f.measure(text) <= self.w - 34
+                self._fit_font = f
+            return f.measure(text) <= self.w - pad
         except Exception:
             return False
 
@@ -920,6 +934,26 @@ class Widget:
         self.lb_status.config(text="刷新中…", fg=MUTED)
         threading.Thread(target=self._worker, daemon=True).start()
 
+    # ---------------- 0 点基准
+
+    def schedule_midnight(self):
+        """排到下一个 0 点过 5 秒。"""
+        nxt = (datetime.datetime.now().replace(hour=0, minute=0, second=5,
+                                               microsecond=0)
+               + datetime.timedelta(days=1))
+        delay = (nxt - datetime.datetime.now()).total_seconds()
+        self.root.after(int(max(1000, delay * 1000)), self.midnight_snapshot)
+
+    def midnight_snapshot(self):
+        """0 点查一次额度，把当时的「已用」记成今天的基准。
+
+        这一枪不受夜间暂停限制——不然 21 点到 08:30 之间没人查，
+        今天的起点就没了，整晚的用量会算到昨天头上。
+        """
+        applog.log("0 点快照：记录今日已用基准")
+        self.refresh()
+        self.schedule_midnight()
+
     def _worker(self):
         """子线程只往队列里丢结果，绝不碰 Tk 组件。"""
         try:
@@ -975,10 +1009,15 @@ class Widget:
         color = GREEN if pct < 80 else (AMBER if pct < 95 else RED)
         self.dot.itemconfig(1, fill=color)
         self.lb_left.config(text=fmt_money(pool), fg=RED if pool < 0 else TEXT)
+        # 今日花费＝当前已用 − 今天 0 点的基准，基准由 rb_daily 落盘
+        try:
+            self.day_spent = rb_daily.used_today(data["used"])
+        except Exception as e:
+            self.day_spent = None
+            applog.log("今日花费算不出来:", e)
         self.lb_pct.config(
             text=(f"本周 {pct:.0f}%" if pct < 1000 else "本周 >999%"), fg=color)
-        detail_txt = f"本周 ${spent:,.2f} / ${quota:,.0f}"
-        self.lb_detail.config(text=detail_txt)
+        self.lb_detail.config(text=self.detail_text(spent, quota))
         self.lb_pool.config(
             text=f"总额度 ${data['total']:,.2f}   ·   已用 ${data['used']:,.2f}")
         self.status_text = time.strftime("%H:%M:%S 刷新", time.localtime(data["at"]))
@@ -988,8 +1027,10 @@ class Widget:
         self.draw_bar()
         if self.icon:
             try:
+                day = (f" · 今日 {fmt_money(self.day_spent)}"
+                       if self.day_spent is not None else "")
                 self.icon.title = (f"{APP_NAME} · 余额 {fmt_money(pool)}"
-                                   f"（本周 {pct:.0f}%）")
+                                   f"（本周 {pct:.0f}%{day}）")
             except Exception:
                 pass
 
@@ -1229,6 +1270,11 @@ def main():
               f"剩 ${pool:,.2f}")
         print(f"总池 ${data['total']:,.2f} · 累计已用 ${data['used']:,.2f} · "
               f"剩 ${data['left']:,.2f}")
+        try:
+            day = rb_daily.used_today(data["used"])
+            print(f"今日已用 ${day:,.2f}（0 点基准 ${rb_daily.base_of():,.2f}）")
+        except Exception as exc:
+            print("今日已用算不出来:", exc)
         return 0
 
     ok, handle = single_instance()
