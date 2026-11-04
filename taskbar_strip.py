@@ -310,6 +310,7 @@ class TaskbarStrip:
         self._sep_w = 0
         self._sep_gap = 0
         self._rgap = 0
+        self._rpad = 4              # 右内边距，测完按栏高重算
         self._day_flag = None         # 上一轮有没有「今日花费」，变了要重算宽度
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
@@ -500,6 +501,9 @@ class TaskbarStrip:
 
         self.stack = bool(self.cfg.get("bar_stack", True))
         self.pad = max(8, int(self._h * 0.22))
+        # 右边只留一点点收边：左边跟任务栏内容对齐才需要大内边距，
+        # 右侧贴着托盘，留多了就是一块空
+        self._rpad = max(3, int(self._h * 0.05))
         self.gap = max(10, int(self._h * 0.30))
         net_w = max(up_w, dn_w) if self.stack else up_w + self.gap + dn_w
         show_mem = bool(self.cfg.get("bar_show_mem", True))
@@ -508,7 +512,7 @@ class TaskbarStrip:
         self._sep_gap = max(4, int(self._h * 0.07))
         # 有中列时，竖线已经起到分隔作用，右列不用再留一大段
         self._rgap = self._sep_gap + 5 if show_mem else self.gap
-        w = self.pad * 2 + net_w
+        w = self.pad + self._rpad + net_w
         if show_mem:
             w += self._sep_gap * 4 + self._sep_w * 2 + self._mid_w
 
@@ -592,7 +596,7 @@ class TaskbarStrip:
             nx = (nrc.left - trc.left) if notify else 0
             if nx <= 0:
                 nx = tw - int(th * 1.85)                  # 通知区宽度约 1.85 倍栏高
-            x = nx - self._w - 8 + dx
+            x = nx - self._w - 3 + dx
             y = (th - self._h) // 2 + dy
         user32.SetWindowPos(self.hwnd, None, x, y, self._w, self._h,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
@@ -750,13 +754,13 @@ class TaskbarStrip:
                 for i, (text, color) in enumerate(right[:2]):
                     cy = h // 2 - dy + i * dy * 2
                     gdi32.SetTextColor(mem, cref(color))
-                    box = wintypes.RECT(x + self._rgap, cy - dy // 2, w - self.pad, cy + dy // 2)
+                    box = wintypes.RECT(x + self._rgap, cy - dy // 2, w - self._rpad, cy + dy // 2)
                     user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
             elif right:
                 text, color = right[0]
                 gdi32.SetTextColor(mem, cref(color))
-                box = wintypes.RECT(x + self._rgap, 0, w - self.pad, h)
+                box = wintypes.RECT(x + self._rgap, 0, w - self._rpad, h)
                 user32.DrawTextW(mem, text, -1, ctypes.byref(box),
                                  DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX)
         else:
