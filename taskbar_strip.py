@@ -452,6 +452,7 @@ class TaskbarStrip:
             self._measure_vertical(tb_rc)
         else:
             self._measure_horizontal(tb_rc)
+        self._unit = self._net_unit()
 
     def _tb_rect(self):
         rc = wintypes.RECT()
@@ -485,13 +486,12 @@ class TaskbarStrip:
                 sz = SIZE()
                 gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(sz))
                 return sz.cx
-            up_w = width("↑ 999.9 MB/s")
-            dn_w = width("↓ 999.9 MB/s")
-            # 样例按常见位数定，再跟当前实际文本取大的：余额涨到五位数
-            # （$12,345.67）时样例不够宽，不补就会被右边界裁掉
-            bal_w = width("$9,999.99 · $9,999.99" if self._has_day()
-                          else "$9,999.99")
-            bal_w = max(bal_w, width(self._bal_text()))
+            up_w = width(self._net_sample("↑"))
+            dn_w = width(self._net_sample("↓"))
+            # 金额按当前真实文本量，留 2px 抗锯齿余量：原来用
+            # "$9,999.99 · $9,999.99" 当样例，$139.54 · $0.00 比它窄一截，
+            # 右边就空出小半列。位数变了有 _bal_width_changed() 每秒兜着
+            bal_w = width(self._bal_text()) + 2
             tok_w = width("999.9M tok")
             mid_w = max(width("100%"), width("MEM"))
         finally:
@@ -626,6 +626,24 @@ class TaskbarStrip:
         """今日花费算出来没有（0 也算有）。"""
         return getattr(self.app, "day_spent", None) is not None
 
+    def _net_unit(self):
+        """当前网速的单位：列宽按它定，别拿 MB/s 的宽度套在 B/s 上。"""
+        try:
+            text = self._fs(self.app.net.up) or ""
+        except Exception:
+            return "MB/s"
+        for u in ("GB/s", "MB/s", "KB/s"):
+            if u in text:
+                return u
+        return "B/s"
+
+    def _net_sample(self, arrow):
+        """网速列定宽样例：同单位下取最宽的写法，数字位数变了也不抖。"""
+        unit = self._net_unit()
+        if unit == "B/s":
+            return arrow + " 9999 B/s"       # B/s 最多四位数（1023）
+        return arrow + " 999.9 " + unit
+
     def _bal_text(self):
         """「$139.54 · $2.43」——余额后面跟一个中间点，再跟今日已用。"""
         w = getattr(self.app, "week", None)
@@ -637,8 +655,8 @@ class TaskbarStrip:
             text += " · " + self._fm(spent, False)
         return text
 
-    def _bal_need_more(self):
-        """金额位数变长（$999 → $12,345）时当前宽度不够了，得重测。"""
+    def _bal_width_changed(self):
+        """金额文本宽度变了就重测：变长会被裁，变短会在右边留一截空白。"""
         if self.vertical or not self._font:
             return False
         hdc = self._hdc()
@@ -647,7 +665,7 @@ class TaskbarStrip:
             sz = SIZE()
             text = self._bal_text()
             gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(sz))
-            return sz.cx > getattr(self, "_bal_w", 0)
+            return abs(sz.cx + 2 - getattr(self, "_bal_w", 0)) > 1
         except Exception:
             return False
         finally:
@@ -851,7 +869,12 @@ class TaskbarStrip:
                 if has_day != self._day_flag:
                     self._day_flag = has_day
                     self._need_measure = True
-                if not getattr(self, "_need_measure", False) and self._bal_need_more():
+                if not getattr(self, "_need_measure", False) and self._bal_width_changed():
+                    self._need_measure = True
+                # 网速换了数量级（B/s → KB/s）列宽要跟着换
+                unit = self._net_unit()
+                if unit != getattr(self, "_unit", None) and not getattr(self, "_need_measure", False):
+                    self._unit = unit
                     self._need_measure = True
                 if getattr(self, "_need_measure", False):
                     self._need_measure = False
