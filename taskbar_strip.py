@@ -311,6 +311,7 @@ class TaskbarStrip:
         self._sep_gap = 0
         self._rgap = 0
         self._rpad = 4              # 右内边距，测完按栏高重算
+        self._tok_w = 0             # token 列实测宽度
         self._day_flag = None         # 上一轮有没有「今日花费」，变了要重算宽度
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="taskbar-strip")
@@ -493,7 +494,9 @@ class TaskbarStrip:
             # "$9,999.99 · $9,999.99" 当样例，$139.54 · $0.00 比它窄一截，
             # 右边就空出小半列。位数变了有 _bal_width_changed() 每秒兜着
             bal_w = width(self._bal_text()) + 2
-            tok_w = width("999.9M tok")
+            tok_text = self._tok_text()
+            tok_w = (width(tok_text) + 2) if tok_text else 0
+            self._tok_w = tok_w
             mid_w = max(width("100%"), width("MEM"))
         finally:
             user32.ReleaseDC(self.hwnd, hdc)
@@ -624,7 +627,14 @@ class TaskbarStrip:
     def _tok_text(self):
         t = getattr(self.app, "today_tok", None) or {}
         total = _tok_total(t)
-        return (_fmt_tok(total) + " tok") if total else ""
+        if not total:
+            return ""
+        text = _fmt_tok(total) + " tok"
+        # 速度跟在后面：70 t/s。近 90 秒没跑请求时 app 会把它置空，这里就不显示
+        sp = getattr(self.app, "tok_speed", None)
+        if sp and sp >= 1:
+            text += " · %d t/s" % int(round(sp))
+        return text
 
     def _has_day(self):
         """今日花费算出来没有（0 也算有）。"""
@@ -658,6 +668,24 @@ class TaskbarStrip:
         if spent is not None:
             text += " · " + self._fm(spent, False)
         return text
+
+    def _tok_width_changed(self):
+        """token 那行的宽度变了（速度出现/消失、位数变化）就重测。"""
+        if self.vertical or not self._font:
+            return False
+        text = self._tok_text()
+        if not text:
+            return False
+        hdc = self._hdc()
+        try:
+            gdi32.SelectObject(hdc, self._font)
+            sz = SIZE()
+            gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(sz))
+            return abs(sz.cx + 2 - getattr(self, "_tok_w", 0)) > 1
+        except Exception:
+            return False
+        finally:
+            user32.ReleaseDC(self.hwnd, hdc)
 
     def _bal_width_changed(self):
         """金额文本宽度变了就重测：变长会被裁，变短会在右边留一截空白。"""
@@ -874,6 +902,9 @@ class TaskbarStrip:
                     self._day_flag = has_day
                     self._need_measure = True
                 if not getattr(self, "_need_measure", False) and self._bal_width_changed():
+                    self._need_measure = True
+                # 速度一出现或多一位数（56 → 170 t/s），token 列宽会变
+                if not getattr(self, "_need_measure", False) and self._tok_width_changed():
                     self._need_measure = True
                 # 网速换了数量级（B/s → KB/s）列宽要跟着换
                 unit = self._net_unit()

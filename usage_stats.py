@@ -12,6 +12,7 @@ import os
 import glob
 import gzip
 import json
+import re
 import time
 import datetime
 import sqlite3
@@ -411,6 +412,134 @@ def today_live():
         return {"req": row["req"], "in": row["in"], "out": row["out"],
                 "cache": row["cache"], "src": "ccswitch"}
     return {"req": 0, "in": 0, "out": 0, "cache": 0, "src": ""}
+
+
+# ---------------- 输出速度（token/秒）
+
+SPEED_WINDOW = 90            # 只认最近 90 秒内跑完的请求
+_SPEED = {"ts": 0.0, "val": None}
+
+
+def _iso_epoch(s):
+    """'2026-11-05T09:27:07.3816314+08:00' -> epoch 秒。
+
+    喜鹊写的时间带 7 位小数，fromisoformat 只认到 6 位，先截一下。
+    """
+    if not isinstance(s, str) or not s:
+        return None
+    s = re.sub(r"\.(\d{6})\d+", r".\1", s.replace("Z", "+00:00"))
+    try:
+        return datetime.datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _magpie_speed_items(path, tail=400_000):
+    """读当天 jsonl 的尾巴，返回 [(结束时刻, 输出 token, 纯生成毫秒)]。
+
+    只读尾巴：日志一天十几兆，每 5 秒全量解析太亏，而速度只看最近几十秒。
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > tail:
+                f.seek(size - tail)
+                f.readline()                     # 丢掉被截断的半行
+            raw = f.read()
+    except OSError:
+        return []
+    items = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if not r.get("done"):
+            continue
+        usages = r.get("usage") or []
+        out = sum(_num(u.get("out")) for u in usages)
+        if out <= 0:
+            continue
+        ms = _num(r.get("ms")) or 0
+        ttft = _num(r.get("ttft")) or 0
+        if not ms:
+            tries = r.get("tries") or []
+            if tries and isinstance(tries[0], dict):
+                ms = _num(tries[0].get("ms")) or 0
+                ttft = ttft or _num(tries[0].get("ttft")) or 0
+        end = _iso_epoch(r.get("time"))
+        if not end or not ms:
+            continue
+        # 扣掉等首字的时间：那段时间没出 token，算进去会把速度压得很低
+        items.append((end + ms / 1000.0, float(out), max(120.0, float(ms - ttft))))
+    return items
+
+
+def _cc_speed_items(window):
+    """CC Switch 的最近请求：output / (latency − first_token)。"""
+    conn = _cc_conn()
+    if not conn:
+        return []
+    try:
+        since = int(time.time()) - window
+        rows = conn.execute(
+            "select output_tokens, latency_ms, first_token_ms, created_at "
+            "from proxy_request_logs where created_at >= ? and output_tokens > 0 "
+            "order by created_at desc limit 50", (since,)).fetchall()
+    except Exception:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    items = []
+    for out, lat, ft, at in rows:
+        ms = float(lat or 0)
+        if ms <= 0:
+            continue
+        items.append((float(at or 0) + ms / 1000.0, float(out),
+                      max(120.0, ms - float(ft or 0))))
+    return items
+
+
+def speed(window=SPEED_WINDOW):
+    """最近一次请求的输出速度（token/秒）。近 window 秒没跑过就返回 None。
+
+    只看最后跑完的那一条：输出 token ÷ 纯生成时长（扣掉 ttft），跟直觉一致
+    ——上一条是多少就是多少，不会被之前的请求摊平。喜鹊优先，那边没有
+    新记录时再问 CC Switch。
+    """
+    now = time.time()
+    if _SPEED["val"] is not None and now - _SPEED["ts"] < 2:
+        return _SPEED["val"]
+    date = datetime.date.today().isoformat()
+    items = []
+    for name in (date + ".jsonl", date + ".jsonl.gz"):   # 当天被压走也认
+        path = os.path.join(MAGPIE_DIR, name)
+        if os.path.exists(path):
+            items = _magpie_speed_items(path)
+            if items:
+                break
+    if not items:
+        items = _cc_speed_items(window)
+    fresh = [it for it in items if now - it[0] <= window and it[2] > 0]
+    if not fresh:                                 # 喜鹊有记录但都过期了，再问一次 CC Switch
+        fresh = [it for it in _cc_speed_items(window)
+                 if now - it[0] <= window and it[2] > 0]
+    val = None
+    if fresh:
+        # 只取最后一条：上一次跑出来多快就显示多快
+        last = max(fresh, key=lambda it: it[0])
+        val = last[1] / (last[2] / 1000.0)
+    if val is not None:
+        val = max(0.0, min(float(val), 9999.0))
+    _SPEED["val"] = val
+    _SPEED["ts"] = now
+    return val
 
 
 if __name__ == "__main__":

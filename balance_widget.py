@@ -73,6 +73,7 @@ class Widget:
         self.settings = None
         self.week = None
         self.day_spent = None       # 今天花掉的额度（当前已用 − 今日 0 点基准）
+        self.tok_speed = None       # 最近 90 秒的输出速度（token/秒）
         self.night_idle = False
         self.update_info = None      # 最近一次检查更新的结果
         self.updating = False        # 正在查 / 正在拉
@@ -249,6 +250,8 @@ class Widget:
             self.today_tok = usage_stats.today_live()
         except Exception:
             self.today_tok = {}
+        self.tok_speed = None            # 最近一次请求的输出速度（token/秒）
+        self.refresh_speed()
         self.render_tok()
         self.render_mem()
         self.root.after(1500, self.tick_usage)
@@ -400,6 +403,7 @@ class Widget:
             self.today_tok = usage_stats.today_live()
         except Exception:
             self.today_tok = {}
+        self.refresh_speed()
         for fn in (self.render_tok, self.render_mem):
             try:
                 fn()
@@ -408,6 +412,13 @@ class Widget:
         # 今日 token 只在真有用量时变；顺便决定要不要去查余额
         self.auto_refresh()
         self.root.after(5000, self.tick_usage)
+
+    def refresh_speed(self):
+        """更新 token 速度；读不到（没装喜鹊/CC Switch 或一直空闲）就置空。"""
+        try:
+            self.tok_speed = usage_stats.speed()
+        except Exception:
+            self.tok_speed = None
 
     def tok_total(self):
         """今日 token 总量；统计还没读出来时返回 None。"""
@@ -1289,6 +1300,8 @@ def main():
             print(f"今日已用 ${day:,.2f}（0 点基准 ${rb_daily.base_of():,.2f}）")
         except Exception as exc:
             print("今日已用算不出来:", exc)
+        sp = usage_stats.speed()
+        print(f"最近一次速度 {sp:.1f} t/s" if sp else "最近一次速度 —（90 秒内没跑请求）")
         return 0
 
     ok, handle = single_instance()
