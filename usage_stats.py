@@ -416,7 +416,7 @@ def today_live():
 
 # ---------------- 输出速度（token/秒）
 
-SPEED_WINDOW = 90            # 只认最近 90 秒内跑完的请求
+SPEED_WINDOW = 300           # 取最近 5 分钟跑完的请求做平均
 _SPEED = {"ts": 0.0, "val": None}
 
 
@@ -434,10 +434,10 @@ def _iso_epoch(s):
         return None
 
 
-def _magpie_speed_items(path, tail=400_000):
+def _magpie_speed_items(path, tail=800_000):
     """读当天 jsonl 的尾巴，返回 [(结束时刻, 输出 token, 纯生成毫秒)]。
 
-    只读尾巴：日志一天十几兆，每 5 秒全量解析太亏，而速度只看最近几十秒。
+    只读尾巴：日志一天十几兆，每 5 秒全量解析太亏，而速度只看最近几分钟。
     """
     try:
         size = os.path.getsize(path)
@@ -488,7 +488,7 @@ def _cc_speed_items(window):
         rows = conn.execute(
             "select output_tokens, latency_ms, first_token_ms, created_at "
             "from proxy_request_logs where created_at >= ? and output_tokens > 0 "
-            "order by created_at desc limit 50", (since,)).fetchall()
+            "order by created_at desc limit 200", (since,)).fetchall()
     except Exception:
         return []
     finally:
@@ -507,11 +507,11 @@ def _cc_speed_items(window):
 
 
 def speed(window=SPEED_WINDOW):
-    """最近一次请求的输出速度（token/秒）。近 window 秒没跑过就返回 None。
+    """最近 window 秒（默认 5 分钟）的平均输出速度，单位 token/秒。
 
-    只看最后跑完的那一条：输出 token ÷ 纯生成时长（扣掉 ttft），跟直觉一致
-    ——上一条是多少就是多少，不会被之前的请求摊平。喜鹊优先，那边没有
-    新记录时再问 CC Switch。
+    窗口内没有请求就返回 None。平均按「输出 token 总量 ÷ 纯生成时长总量」
+    算，等于给大请求更高权重：小请求一条 30 token、生成 0.3 秒也算高速度，
+    直接算术平均会被它们带偏。喜鹊优先，那边没有新记录时再问 CC Switch。
     """
     now = time.time()
     if _SPEED["val"] is not None and now - _SPEED["ts"] < 2:
@@ -532,9 +532,10 @@ def speed(window=SPEED_WINDOW):
                  if now - it[0] <= window and it[2] > 0]
     val = None
     if fresh:
-        # 只取最后一条：上一次跑出来多快就显示多快
-        last = max(fresh, key=lambda it: it[0])
-        val = last[1] / (last[2] / 1000.0)
+        out = sum(it[1] for it in fresh)
+        gen = sum(it[2] for it in fresh)
+        if out > 0 and gen > 0:
+            val = out / (gen / 1000.0)
     if val is not None:
         val = max(0.0, min(float(val), 9999.0))
     _SPEED["val"] = val

@@ -630,8 +630,8 @@ class TaskbarStrip:
         if not total:
             return ""
         text = _fmt_tok(total) + " tok"
-        # 速度跟在后面：70 t/s。近 90 秒没跑请求时 app 会把它置空，
-        # 这里再挡一道：空值、0、不到 1 t/s 都不显示，绝不出现「0 t/s」
+        # 速度跟在后面：70 t/s（近 5 分钟平均）。窗口内没跑请求时 app
+        # 会把它置空，这里再挡一道：空值、0、不到 1 t/s 都不显示
         sp = getattr(self.app, "tok_speed", None)
         if sp is not None and sp >= 1:
             text += " · %d t/s" % int(round(sp))

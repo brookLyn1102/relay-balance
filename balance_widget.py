@@ -73,7 +73,7 @@ class Widget:
         self.settings = None
         self.week = None
         self.day_spent = None       # 今天花掉的额度（当前已用 − 今日 0 点基准）
-        self.tok_speed = None       # 最近 90 秒的输出速度（token/秒）
+        self.tok_speed = None       # 近 5 分钟的平均输出速度（token/秒）
         self.night_idle = False
         self.update_info = None      # 最近一次检查更新的结果
         self.updating = False        # 正在查 / 正在拉
@@ -250,7 +250,7 @@ class Widget:
             self.today_tok = usage_stats.today_live()
         except Exception:
             self.today_tok = {}
-        self.tok_speed = None            # 最近一次请求的输出速度（token/秒）
+        self.tok_speed = None            # 近 5 分钟的平均输出速度（token/秒）
         self.refresh_speed()
         self.render_tok()
         self.render_mem()
@@ -1301,7 +1301,7 @@ def main():
         except Exception as exc:
             print("今日已用算不出来:", exc)
         sp = usage_stats.speed()
-        print(f"最近一次速度 {sp:.1f} t/s" if sp else "最近一次速度 —（90 秒内没跑请求）")
+        print(f"近 5 分钟平均速度 {sp:.1f} t/s" if sp else "近 5 分钟平均速度 —（窗口内没跑请求）")
         return 0
 
     ok, handle = single_instance()
